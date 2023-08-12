@@ -76,6 +76,7 @@ def get_best_alignment(target_sequence, primers, seq_id='ID_not_specified'):
             result['direction'] = direction
             result['primer_name'] = name
             result['score'] = score
+            max_score = score
     
     result['seq_id'] = seq_id
 
@@ -90,6 +91,8 @@ def show_alignment_simple(alignments, line_length=100):
             alignment is given, they must have the same target sequence.
             This can be useful, e.g., for looking at the forward and
             reverse primers aligned to the same sequence.
+        line_length (int): Number of characters to print in each line.
+            Defaults to 100.
         
     Returns:
         None

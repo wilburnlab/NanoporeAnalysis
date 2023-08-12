@@ -52,6 +52,38 @@ def read_fastx(file_name: str | Path,
         raise FileContentsError(f'No sequences found in FASTA file: "{file_name}"')
     
     return seq_dict
+
+
+def write_fasta(file_name: str | Path, 
+                seq_dict: dict,
+                nchars: int = 80,
+                mode: str = 'w'):
+    """Write a dict of sequences to a multipart FASTA file.
+    
+    Args:
+        file_name (str or Path): destination file.
+        seq_dict (dict): Keys are sequence names and values are the 
+            corresponding sequences.
+        nchars (int): max number of characters on every line of the FASTA file.
+            Defaults to 80.
+        mode (str): parameter to pass to the open() function. If 'w', overwrites
+            the file; if 'a', appends to an existing file. Defaults to 'w'.
+        
+    Returns:
+        None
+    
+    """
+    
+    file_name = Path(file_name)
+    
+    
+    with open(file_name, mode) as f:
+        for name, seq in seq_dict.items():
+            f.write('>' + name + '\n')
+
+            for i in range (len(seq) // nchars + 1):
+                f.write(seq[i*nchars:(i+1)*nchars] + '\n')
+    return
             
 '''           
             
