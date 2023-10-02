@@ -45,7 +45,12 @@ def read_fastx(file_name: str | Path,
                 fastx.readline()
                 score = decode_phred( fastx.readline().rstrip() )
                 if len(name) == 0: break
-                seq_dict[name] = { 'Sequence' : sequence, 'Score' : score }
+                if '\t' in name :
+                    split = name.split('\t')
+                    seq_dict[split[0]] = { 'Sequence' : sequence, 'Score' : score , 'Tags' : split[1:]}
+                else : 
+                    seq_dict[name] = { 'Sequence' : sequence, 'Score' : score }
+                    
         
     # Ensure there are sequences in the file
     if not seq_dict:
