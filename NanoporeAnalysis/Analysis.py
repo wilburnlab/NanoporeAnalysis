@@ -26,11 +26,8 @@ from importlib import reload
 reload(align)
 
 """
-condense/cleanup code
-progress reporter for alignment
+Todo:
 Give Dorado options. ie Simplex calling
-Move more path declarations into __init__
-Skip over fastq conversion by using bams and pysam
 
 QC metrics:
     plot Read lengths by barcode or sample.
@@ -44,21 +41,24 @@ Analysis functions:
     PCA    
     
 Check alignments from the unclassified file. See if any can be properly barcoded.
-Add method for chopping up input data into smaller files
-make  get_best_alignment return something special for when the ss primer filter isnt met
-
 """
+
 class ONTanalysis :
-    def __init__(self, path_data, path_out) :
+    def __init__(self, path_data, path_out, data_type='pod5') :
+        """
+        Inputs:
+            path_data (str) : points to a folder containing either .pod5 files off the sequencer or .fastq or .bam files from the basecaller.
+            path_out (str) : points to a folder for output. A file tree will be built within this folder to contain all intermediate and final analysis files.
+            data_type (str) : pod5, bam, or fastq. designates what data type the input is
+        """
+        #Verify the provided paths
+        self.path_out = str(Path(path_out).absolute())
+        Path(self.path_out).mkdir(parents=True, exist_ok=True)
         self.path_data = str(Path(path_data).absolute())
         if Path(self.path_data).is_dir() == False :
-            print("Error: Data path is invalid or doesn't exist. Please point to an existing directory containing Pod5 files.")
-        self.path_out = str(Path(path_out).absolute())
-        try :
-            Path(self.path_out).mkdir(parents=True, exist_ok=True)
-        except FileExistsError :
-            if Path(self.path_out + "/temp_aligned_reads/").is_dir() :
-                print("Error: Ouput path may already contain data. Please point to an empty or non-existing directory")
+            print("Error: Data path is invalid or doesn't exist. Please point to an existing directory containing data.")
+        
+        #Create file structure
         self.path_split_pod5s = self.path_out + '/split_pod5s'
         Path(self.path_split_pod5s).mkdir(parents=True, exist_ok=True)
         self.path_logs = self.path_out + '/logs'
@@ -77,13 +77,22 @@ class ONTanalysis :
         Path(self.path_fastqs).mkdir(parents=True, exist_ok=True)
         self.path_fastas = self.path_out + '/fasta'
         Path(self.path_fastas).mkdir(parents=True, exist_ok=True)
-        self.path_basecalls = self.path_out + '/basecalls'
-        Path(self.path_fastqs).mkdir(parents=True, exist_ok=True)
-        self.path_qc = self.path_out + '/qc.'
+        self.path_qc = self.path_out + '/qc'
+        Path(self.path_qc).mkdir(parents=True, exist_ok=True)
+        
+        #Validate input data type
+        if data_type == 'bam' :
+            break
+        elif data_type == 'fastq' :
+            shutil.copy(Path(self.path_data).iterdir(), self.path_out)
+        elif data_type == 'bam' :
+            shutil.copy(Path(self.path_data).iterdir(), self.path_pod5_bams)
+        else:
+            print('Invalid data type specified. Please declare a valid input data type.')
     
     def run_dorado_slurm(self, path_dorado, path_model, account, mail, workers=1) :
         """
-        
+        For running dorado through SLURM cluster job scheduling.
         
         """
         pod5_view.view_pod5([Path(self.path_data)], Path(self.path_out), include = "read_id, channel", force_overwrite=True)
@@ -110,6 +119,15 @@ class ONTanalysis :
         return
         
     def run_dorado(self, path_dorado, path_model, workers=1, skip_split=False) :
+        """
+        Run Dorado duplex basecalling on provided data.
+        Args :
+            path_dorado (str) : path to dorado executable
+            path_model (str) : path to dorado model
+            workers (int) : number of dorado processes to spawn. In this function, this just serves to split the data up for manageability and stability reasons.
+            skip_split (boolean) : whether or not to skip splitting the pod5 files. Set to true if the pod5s have previously been split for duplex calling.
+        Output: None
+        """
         if skip_split == False :
             pod5_view.view_pod5([Path(self.path_data)], Path(self.path_out), include = "read_id, channel", force_overwrite=True)
             pod5_subset.subset_pod5([Path(self.path_data)], Path(self.path_split_pod5s), columns = ["channel"], table = Path(self.path_out + "/view.txt"))
@@ -124,6 +142,10 @@ class ONTanalysis :
         return
     
     def bam_to_fastq(self) :
+        """
+        For converting bam files to fastq
+        Output: None
+        """
         files = [x for x in Path(self.path_pod5_bams).iterdir() if x.is_file()]
         Path(self.path_pod5_bams + '/sorted_by_name/').mkdir(parents=True, exist_ok=True)
         
@@ -140,16 +162,18 @@ class ONTanalysis :
         aligns barcodes and strand_switch primer, then saves to file by barcode and whether the fliter was met.
 
         args:
-            path_barcodes (str) : file path for a csv containing the barcodes
+            path_barcodes (str) : file path for a csv containing a column defining barcode primer names and a second column defining their sequences
             strand_switch_primer (str) : sequence for the strand_switch_primer
+            path_data (str) : file path to a folder with fastx files. For use with data basecalled on machine/elsewhere
             filter_barcode_score (int) : filter for barcode alignment. slightly speeds up alignment by 10-20% if set to ~90% of the max alignment score
             filter_barcode_distance (int) : similar to filter_barcode_score, but for min aligned distance. Less effective
-            filter_strand_switch_score : minimum score for the strand_switch_primer alignment. Below this filter, a full alignment is done for the barcode
-            threshold_barcode : minimum score for barcode alignment when sorting into files. Reads not meeting this filter get put into 'unclassified.fastq'
-            threshold_strand_switch : minimum score for ss primer alignment when sorting into files. Reads not meeting this filter get put into a '*_incomplete.fastq' file for their given barcode
+            filter_strand_switch_score : minimum score for the strand_switch_primer alignment. Below this filter, a full alignment is done for the barcode. By default, this is set to half the maximum score for the given sequence
+            threshold_barcode : minimum score for barcode alignment when sorting into files. Reads not meeting this filter get put into 'unclassified.fastq'. By default, this is set to half the maximum score for the given sequence.
+            threshold_strand_switch : minimum score for ss primer alignment when sorting into files. Reads not meeting this filter get put into a '*_incomplete.fastq' file for their given barcode. By default, this is set to half the maximum score for the given sequence.
         Output:
             None: Writes to file.
         """
+        
         if filter_strand_switch_score == None : filter_strand_switch_score = len(strand_switch_primer) * 0.5 * 2
         if threshold_strand_switch == None : threshold_strand_switch = len(strand_switch_primer) * 0.5 * 2
         
@@ -299,8 +323,8 @@ class ONTanalysis :
         Calls Minimap2 to map all reads in given path based on a given reference. Saves mapped reads into new folder.
 
         Args:
-            path_ref (str) = path to reference file
             path_minimap2 (str) = path to minimap2 executable
+            path_ref (str) = path to reference file
 
         Output: None
         """
@@ -325,6 +349,8 @@ class ONTanalysis :
         
         Args:
             path_bed_file (str) = path to bed file
+            samples (dict) = dictionary defining the barcodes for each sample. Follow format {sample name : [barcodes]...}
+            count (boolean) = whether or not to perform the read counting. Set to False if counting has already been done previously, ie to re-define sample barcodes.
         Outputs: None
         """
         
@@ -381,30 +407,14 @@ class ONTanalysis :
         
         return
     
-    def count_reads_util(self, bed_line, bam_file_path, sample_name):
-        """Defunct. Return the # of reads from bam file that overlap an interval given by bed file line."""
-        
-        cols = bed_line.split('\t')
-        
-        bamfile = pysam.AlignmentFile(bam_file_path, "rb")
-        bam_iter = bamfile.fetch(cols[0], int(cols[1]), int(cols[2]))
-        
-        read_count = 0
-        read_seq = []
-        for x in bam_iter:
-            name = x.query_name
-            seq = x.query_sequence
-            #if not isinstance(seq, str): seq = "EMPTY"
-            #if isinstance(seq, str):
-                #read_seq.append(' '.join([name, seq]))
-            read_count += 1
-        #read_seq_str = '\n'.join(read_seq)
-        feature_name = cols[3]
-        
-        
-        return [sample_name, feature_name, read_count]
-    
     def qc_metrics(self, alignment_scores_hist_max=None) :
+        """
+        Calculate quality control metrics.
+        Args:
+            alignment_scores_hist_max (int) : set the max x-axis value for the read length histograms for legibility. Default is 3000 bp.
+        Output:
+            None, displays histograms for read lengths according to passing barcode and strand_switch thresholds. Currently, uses the thresholds manually set. 
+        """
         qc = {}
         files = [str(x) for x in Path(self.path_debarcoded).iterdir() if x.is_file()]
         df = pd.DataFrame()
@@ -433,7 +443,16 @@ class ONTanalysis :
             qc[str(barcode + '_count')] = len(df[df['primer_name'] == barcode])
         return
     
-    def diff_exp(self, samples, meta_data, design_factors) :
+    def diff_exp(self, samples, meta_data, design_factor) :
+        """
+        Do a differential expression analysis, display a volcano plot, and save the diff exp gene results.
+        Args:
+            samples (list of str) : List of sample names to include in the analysis
+            meta_data (dataframe) : meta data for the samples with indexes of sample names and named columns referring to the experimental conditions that differentiate them, ie cell type, growth condition, treatment.
+            design_factor (str) : the experimental condition to do diff exp on. Must match one of the column names in meta_data.
+        Output:
+            Shows resulting volcano plot and saves analysis to file under self.path_out with a name referring to the samples and design_factor provided.
+        """
         counts_by_sample = pd.read_csv(self.path_out + '/counts_by_sample.csv', index_col='feature_name')
         
         volcano_data = counts_by_sample[counts_by_sample.min(axis=1) >= 5].loc[:,samples].T
@@ -442,15 +461,16 @@ class ONTanalysis :
         dds = DeseqDataSet(
             counts=volcano_data,
             metadata=volcano_meta,
-            design_factors=design_factors,
+            design_factors=design_factor,
             quiet=True
         )
         dds.deseq2()
         stat_res = DeseqStats(dds, quiet=True)
         stat_res.summary()
         df = stat_res.results_df.reset_index().dropna().copy()
-        pd.DataFrame.from_dict(df).to_csv(str(self.path_out + '/diff_seq_' + str(samples) + '_' + design_factors + '.csv'), header=True)
+        pd.DataFrame.from_dict(df).to_csv(str(self.path_out + '/diff_seq_' + str(samples) + '_' + design_factor + '.csv'), header=True)
         df = df.drop(df['pvalue'].idxmin(axis=0))
         
         visuz.GeneExpression.volcano(df=df, lfc='log2FoldChange', pv='pvalue', show=True)
         return
+        
