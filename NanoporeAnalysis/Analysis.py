@@ -41,60 +41,44 @@ Analysis functions:
     PCA    
     
 Check alignments from the unclassified file. See if any can be properly barcoded.
+
+Workflow:
+Initialize object with path_out
 """
 
 class ONTanalysis :
-    def __init__(self, path_data, path_out, data_type='pod5') :
+    def __init__(self, path_out, path_data=None) :
         """
         Inputs:
-            path_data (str) : points to a folder containing either .pod5 files off the sequencer or .fastq or .bam files from the basecaller.
             path_out (str) : points to a folder for output. A file tree will be built within this folder to contain all intermediate and final analysis files.
-            data_type (str) : pod5, bam, or fastq. designates what data type the input is
+            path_data (str) : points to a folder containing either .pod5 files off the sequencer or .fastq or .bam files from the basecaller.
         """
         #Verify the provided paths
         self.path_out = str(Path(path_out).absolute())
         Path(self.path_out).mkdir(parents=True, exist_ok=True)
         self.path_data = str(Path(path_data).absolute())
-        if Path(self.path_data).is_dir() == False :
-            print("Error: Data path is invalid or doesn't exist. Please point to an existing directory containing data.")
-        
-        #Create file structure
-        self.path_split_pod5s = self.path_out + '/split_pod5s'
-        Path(self.path_split_pod5s).mkdir(parents=True, exist_ok=True)
-        self.path_logs = self.path_out + '/logs'
-        Path(self.path_logs).mkdir(parents=True, exist_ok=True)
-        self.path_pod5_bams = self.path_out + '/pod5_bams'
-        Path(self.path_pod5_bams).mkdir(parents=True, exist_ok=True)
-        self.path_tmp_aligned = self.path_out + "/temp_aligned_reads/"
-        Path(self.path_tmp_aligned).mkdir(parents=True, exist_ok=True)
-        self.path_debarcoded = self.path_out + '/debarcoded'
-        Path(self.path_debarcoded).mkdir(parents=True, exist_ok=True)
-        self.path_sams = self.path_out + '/sams'
-        Path(self.path_sams).mkdir(parents=True, exist_ok=True)
-        self.path_bams = self.path_out + '/bams'
-        Path(self.path_bams).mkdir(parents=True, exist_ok=True)
-        self.path_fastqs = self.path_out + '/fastq'
-        Path(self.path_fastqs).mkdir(parents=True, exist_ok=True)
-        self.path_fastas = self.path_out + '/fasta'
-        Path(self.path_fastas).mkdir(parents=True, exist_ok=True)
+        if path_data != None:
+            if not ( Path(self.path_data).is_dir() or os.listdir(self.path_data) ) :
+                raise FileNotFoundError("Error: Data path is invalid or doesn't exist. Please point to an existing directory containing data.")
+                
         self.path_qc = self.path_out + '/qc'
-        Path(self.path_qc).mkdir(parents=True, exist_ok=True)
+        self.path_logs = self.path_out + '/logs'
+        self.path_pod5_bam = self.path_out + '/pod5_bam'
+        self.path_fastq = self.path_out + '/fastq'
+        self.path_split_pod5s = self.path_out + '/split_pod5s'
+        self.path_tmp_aligned = self.path_out + "/temp_aligned_reads"
+        self.path_debarcoded = self.path_out + '/debarcoded'
+        self.path_fasta = self.path_out + '/fasta'
+        self.path_sam = self.path_out + '/sam'
+        self.path_bam = self.path_out + '/bam'
         
-        #Validate input data type
-        if data_type == 'bam' :
-            break
-        elif data_type == 'fastq' :
-            shutil.copy(Path(self.path_data).iterdir(), self.path_out)
-        elif data_type == 'bam' :
-            shutil.copy(Path(self.path_data).iterdir(), self.path_pod5_bams)
-        else:
-            print('Invalid data type specified. Please declare a valid input data type.')
-    
     def run_dorado_slurm(self, path_dorado, path_model, account, mail, workers=1) :
         """
         For running dorado through SLURM cluster job scheduling.
-        
+        Note: currently non-functional
         """
+        Path(self.path_logs).mkdir(parents=True, exist_ok=True)
+        
         pod5_view.view_pod5([Path(self.path_data)], Path(self.path_out), include = "read_id, channel", force_overwrite=True)
         pod5_subset.subset_pod5([Path(self.path_data)], self.path_split_pod5s, columns = ["channel"], table = Path(self.path_out + "/view.txt"))
         files = [x for x in Path(self.path_split_pod5s).iterdir() if x.is_file()]
@@ -110,7 +94,7 @@ class ONTanalysis :
                 '#SBATCH --mail-type=FAIL\n',
                 str('#SBATCH --mail-user=' + mail + '\n'),
                 str('cd ' + self.path_basecalls + '\n'),
-                str(path_dorado + " duplex " + path_model + self.path_split_pod5s + '/' + i + ' > ' + self.path_pod5_bams + i + '.bam'),
+                str(path_dorado + " duplex " + path_model + self.path_split_pod5s + '/' + i + ' > ' + self.path_pod5_bam + i + '.bam'),
             ]
             with open(str(self.path_logs + 'dorado_' + str(i) + '.sh'), 'w') as handle:
                 handle.writelines(script)
@@ -128,57 +112,79 @@ class ONTanalysis :
             skip_split (boolean) : whether or not to skip splitting the pod5 files. Set to true if the pod5s have previously been split for duplex calling.
         Output: None
         """
+        Path(self.path_pod5_bam).mkdir(parents=True, exist_ok=True)
+        Path(self.path_fastq).mkdir(parents=True, exist_ok=True)
+        Path(self.path_split_pod5s).mkdir(parents=True, exist_ok=True)
+        if os.listdir(self.path_pod5_bam) or os.listdir(self.path_fastq) or os.listdir(self.path_split_pod5s) and overwrite == False :
+            raise FileExistsError("Error: output path may contain data. Please point to a fresh directory or specify overwrite=True")
+        elif overwrite == True :
+            shutil.rmtree(self.path_pod5_bam)
+            shutil.rmtree(self.path_fastq)
+            shutil.rmtree(self.path_split_pod5s)
+            Path(self.path_pod5_bam).mkdir(parents=True, exist_ok=True)
+            Path(self.path_fastq).mkdir(parents=True, exist_ok=True)
+            Path(self.path_split_pod5s).mkdir(parents=True, exist_ok=True)
+        
         if skip_split == False :
             pod5_view.view_pod5([Path(self.path_data)], Path(self.path_out), include = "read_id, channel", force_overwrite=True)
             pod5_subset.subset_pod5([Path(self.path_data)], Path(self.path_split_pod5s), columns = ["channel"], table = Path(self.path_out + "/view.txt"))
         files = [x for x in Path(self.path_split_pod5s).iterdir() if x.is_file()]
         arrays = np.array_split(np.array(files), workers)
+        
         for i in range(workers) :
             Path(self.path_out + '/split_pod5s_byworker/' + str(i)).mkdir(parents=True, exist_ok=True)
             for path in arrays[i] :
                 shutil.copy(str(path), str(self.path_out + '/split_pod5s_byworker/' + str(i)))
-            args = [str(path_dorado + " duplex " + path_model + ' ' + str(self.path_out + '/split_pod5s_byworker/' + str(i)) + ' > ' + self.path_pod5_bams + '/' + str(i) + '.bam')]
+            args = [str(path_dorado + " duplex " + path_model + ' ' + str(self.path_out + '/split_pod5s_byworker/' + str(i)) + ' > ' + self.path_pod5_bam + '/' + str(i) + '.bam')]
             subprocess.run(args, shell=True)
-        return
-    
-    def bam_to_fastq(self) :
-        """
-        For converting bam files to fastq
-        Output: None
-        """
-        files = [x for x in Path(self.path_pod5_bams).iterdir() if x.is_file()]
-        Path(self.path_pod5_bams + '/sorted_by_name/').mkdir(parents=True, exist_ok=True)
+        
+        files = [x for x in Path(self.path_pod5_bam).iterdir() if x.is_file()]
+        Path(self.path_pod5_bam + '/sorted_by_name/').mkdir(parents=True, exist_ok=True)
         
         for file in files : 
-            print(file)
-            pysam.sort('-o', str(self.path_pod5_bams + '/sorted_by_name/' + file.stem + '_sorted.bam'), '-n', str(file) )
-            Path(str(self.path_fastqs + '/'+ file.stem + '.fq')).touch()
-            pysam.fastq('-0', str(self.path_fastqs + '/'+ file.stem + '.fq'), '-T', 'dx', str(self.path_pod5_bams + '/sorted_by_name/' + file.stem + '_sorted.bam'))
-            
+            print("converting ", file, " to fastq")
+            pysam.sort('-o', str(self.path_pod5_bam + '/sorted_by_name/' + file.stem + '_sorted.bam'), '-n', str(file) )
+            Path(str(self.path_fastq + '/'+ file.stem + '.fq')).touch()
+            pysam.fastq('-0', str(self.path_fastq + '/'+ file.stem + '.fq'), '-T', 'dx', str(self.path_pod5_bam + '/sorted_by_name/' + file.stem + '_sorted.bam'))
+        
         return
                 
-    def debarcode(self, path_barcodes, strand_switch_primer, filter_barcode_score = 0, filter_barcode_distance = 0, filter_strand_switch_score = None, threshold_barcode = None, threshold_strand_switch = None) :
+    def debarcode(self, path_barcodes, strand_switch_primer, path_fastq=None, overwrite=False, filter_barcode_score = 0, filter_barcode_distance = 0, filter_strand_switch_score = None, threshold_barcode = None, threshold_strand_switch = None) :
         """
         aligns barcodes and strand_switch primer, then saves to file by barcode and whether the fliter was met.
 
         args:
             path_barcodes (str) : file path for a csv containing a column defining barcode primer names and a second column defining their sequences
             strand_switch_primer (str) : sequence for the strand_switch_primer
-            path_data (str) : file path to a folder with fastx files. For use with data basecalled on machine/elsewhere
+            path_fastq (str) : file path to a folder with fastx files. For use with data basecalled on machine/elsewhere
             filter_barcode_score (int) : filter for barcode alignment. slightly speeds up alignment by 10-20% if set to ~90% of the max alignment score
             filter_barcode_distance (int) : similar to filter_barcode_score, but for min aligned distance. Less effective
             filter_strand_switch_score : minimum score for the strand_switch_primer alignment. Below this filter, a full alignment is done for the barcode. By default, this is set to half the maximum score for the given sequence
-            threshold_barcode : minimum score for barcode alignment when sorting into files. Reads not meeting this filter get put into 'unclassified.fastq'. By default, this is set to half the maximum score for the given sequence.
-            threshold_strand_switch : minimum score for ss primer alignment when sorting into files. Reads not meeting this filter get put into a '*_incomplete.fastq' file for their given barcode. By default, this is set to half the maximum score for the given sequence.
+            threshold_barcode : minimum score for barcode alignment when sorting into files. Reads not meeting this filter get put into 'unclassified.fq'. By default, this is set to half the maximum score for the given sequence.
+            threshold_strand_switch : minimum score for ss primer alignment when sorting into files. Reads not meeting this filter get put into a '*_incomplete.fq' file for their given barcode. By default, this is set to half the maximum score for the given sequence.
         Output:
             None: Writes to file.
         """
+        if path_fastq == None : path_fastq = self.path_fastq
+        
+        Path(self.path_tmp_aligned).mkdir(parents=True, exist_ok=True)
+        Path(self.path_debarcoded).mkdir(parents=True, exist_ok=True)
+        Path(self.path_fasta).mkdir(parents=True, exist_ok=True)
+        if ( os.listdir(self.path_tmp_aligned) or os.listdir(self.path_debarcoded) or os.listdir(self.path_fasta) ) and overwrite == False :
+            raise FileExistsError("Error: output path may contain data. Please point to a fresh directory or specify overwrite=True")
+        elif overwrite == True :
+            shutil.rmtree(self.path_tmp_aligned)
+            shutil.rmtree(self.path_debarcoded)
+            shutil.rmtree(self.path_fasta)
+            Path(self.path_tmp_aligned).mkdir(parents=True, exist_ok=True)
+            Path(self.path_debarcoded).mkdir(parents=True, exist_ok=True)
+            Path(self.path_fasta).mkdir(parents=True, exist_ok=True)
         
         if filter_strand_switch_score == None : filter_strand_switch_score = len(strand_switch_primer) * 0.5 * 2
         if threshold_strand_switch == None : threshold_strand_switch = len(strand_switch_primer) * 0.5 * 2
         
         reload(align)
-
+        
         #load barcodes
         barcodes = pd.read_csv(path_barcodes, names=['name', 'seq'])
         barcodes_clean = barcodes.copy()
@@ -186,13 +192,14 @@ class ONTanalysis :
         barcodes_clean = barcodes_clean.set_index('name').T.to_dict('records')[0]
         
         #find data
-        files = [x for x in Path(self.path_fastqs).iterdir() if x.is_file()][:1]
-
+        files = [x for x in Path(path_fastq).iterdir() if x.is_file()][:1]
+        
         start_time = time.time()
         aligned_reads = []
+        
         dump_index = 1
         read_count = 0
-
+        
         for file in files:
 
             file_name = str(Path(file).stem)
@@ -208,7 +215,7 @@ class ONTanalysis :
             if sys.getsizeof(aligned_reads) > 100000 or files.index(file) + 1 >= len(files) :
                 
                 print('Saved data to temp file ' + str(dump_index))
-                with open(self.path_tmp_aligned +'saved_read_alignments_' + str(dump_index) + '.txt', 'wb') as handle:
+                with open(self.path_tmp_aligned +'/saved_read_alignments_' + str(dump_index) + '.txt', 'wb') as handle:
                     pickle.dump(aligned_reads, handle)
                 dump_index += 1
                 read_count += len(aligned_reads)
@@ -251,6 +258,9 @@ class ONTanalysis :
                     tmp_threshold_barcode = len(a['alignment']['query_sequence']) * 0.5 * 2 
                 else :
                     tmp_threshold_barcode = threshold_barcode
+                    
+                a['threshold_barcode'] = tmp_threshold_barcode
+                a['threshold_strand_switch'] = threshold_strand_switch
                 
                 if score_barcode > tmp_threshold_barcode:
                     if score_strand_switch > threshold_strand_switch:
@@ -259,6 +269,7 @@ class ONTanalysis :
                     else:
                         seq_by_barcode[primer_name + '_incomplete'][key] = bio_seq
                         data_by_barcode[primer_name + '_incomplete'][key] = a
+                        
                 else:
                     seq_by_barcode['unclassified'][key] = bio_seq
                     data_by_barcode['unclassified'][key] = a
@@ -268,7 +279,7 @@ class ONTanalysis :
         # Save data into multiple FASTA files
 
         for category in seq_by_barcode.keys():
-            fasta_file = Path(self.path_fastas) / (category + '.fa')
+            fasta_file = Path(self.path_fasta) / (category + '.fa')
             local_io.write_fasta(fasta_file, seq_by_barcode[category], mode='w')
             df = pd.DataFrame.from_dict(data_by_barcode[category], orient = 'index')
             df.to_csv(str(self.path_debarcoded + '/' + category + '.csv'), header=True, index_label='read_id')
@@ -308,7 +319,7 @@ class ONTanalysis :
                 '#SBATCH --mail-type=FAIL\n',
                 '#SBATCH --mem=32gb\n',
                 str('#SBATCH --mail-user=' + mail + '\n'),
-                str(path_minimap2 + ' -ax splice ' + path_ref + ' ' + file + ' > ' + self.path_sams + '/' + Path(file).stem + '.sam'),
+                str(path_minimap2 + ' -ax splice ' + path_ref + ' ' + file + ' > ' + self.path_sam + '/' + Path(file).stem + '.sam'),
             ]
             with open(str(path_tmp_mapped + Path(file).stem + '.sh'), 'w') as handle:
                 handle.writelines(script)
@@ -328,15 +339,24 @@ class ONTanalysis :
 
         Output: None
         """
-
+        Path(self.path_sam).mkdir(parents=True, exist_ok=True)
+        Path(self.path_bam).mkdir(parents=True, exist_ok=True)
+        if os.listdir(self.path_sam) or os.listdir(self.path_bam) and overwrite == False :
+            raise FileExistsError("Error: output path may contain data. Please point to a fresh directory or specify overwrite=True")
+        elif overwrite == True :
+            shutil.rmtree(self.path_sam)
+            shutil.rmtree(self.path_bam)
+            Path(self.path_sam).mkdir(parents=True, exist_ok=True)
+            Path(self.path_bam).mkdir(parents=True, exist_ok=True)
+        
         #Minimap2 alignment
-        files_debarcoded = [str(x) for x in Path(self.path_fastas).iterdir() if x.is_file() and x.suffix == '.fa' ]
+        files_debarcoded = [str(x) for x in Path(self.path_fasta).iterdir() if x.is_file() and x.suffix == '.fa' ]
         for file in files_debarcoded :
             print('mapping file ', Path(file).stem)
-            args = [str(path_minimap2 + ' -ax splice ' + path_ref + ' ' + file + ' > ' + self.path_sams + '/' + Path(file).stem + '.sam')]
+            args = [str(path_minimap2 + ' -ax splice ' + path_ref + ' ' + file + ' > ' + self.path_sam + '/' + Path(file).stem + '.sam')]
             subprocess.run(args, shell=True)
-            pysam.sort("-o", str(self.path_bams + '/' + Path(file).stem + '.bam'), self.path_sams + '/' + Path(file).stem + '.sam')
-            pysam.index(str(self.path_bams + '/' + Path(file).stem + '.bam'))
+            pysam.sort("-o", str(self.path_bam + '/' + Path(file).stem + '.bam'), self.path_sam + '/' + Path(file).stem + '.sam')
+            pysam.index(str(self.path_bam + '/' + Path(file).stem + '.bam'))
             
             
         print("Done mapping")
@@ -355,7 +375,7 @@ class ONTanalysis :
         """
         
         if count == True :
-            bam_files = [str(x) for x in Path(self.path_bams).iterdir() if x.is_file() and x.suffix == '.bam']
+            bam_files = [str(x) for x in Path(self.path_bam).iterdir() if x.is_file() and x.suffix == '.bam']
             start_time = time.time()
             counts = pd.DataFrame()
             for file in bam_files:
@@ -415,6 +435,8 @@ class ONTanalysis :
         Output:
             None, displays histograms for read lengths according to passing barcode and strand_switch thresholds. Currently, uses the thresholds manually set. 
         """
+        Path(self.path_qc).mkdir(parents=True, exist_ok=True)
+        
         qc = {}
         files = [str(x) for x in Path(self.path_debarcoded).iterdir() if x.is_file()]
         df = pd.DataFrame()
@@ -423,21 +445,22 @@ class ONTanalysis :
         qc['read_count'] = len(df.index)
         #print(df)
         if alignment_scores_hist_max == None : alignment_scores_hist_max = 3000
+        
         fig1, qc['alignment_scores_hist'] = plt.subplots(2,2, sharex=True)
-        qc['alignment_scores_hist'][0,0].hist(df[(df['barcode_score'] >= 60) & (df['strand_switch_score'] >= 20)]['read_length'], bins=50, range=(0, alignment_scores_hist_max))
+        qc['alignment_scores_hist'][0,0].hist(df[(df['barcode_score'] >= df['threshold_barcode']) & (df['strand_switch_score'] >= df['threshold_strand_switch'])]['read_length'], bins=50, range=(0, alignment_scores_hist_max))
         qc['alignment_scores_hist'][0,0].set_title('Passed Barcode and Strand Switch', {'fontsize': 10})
-        qc['alignment_scores_hist'][0,1].hist(df[(df['barcode_score'] >= 60) & (df['strand_switch_score'] < 20)]["read_length"], bins=50, range=(0, alignment_scores_hist_max))
+        qc['alignment_scores_hist'][0,1].hist(df[(df['barcode_score'] >= df['threshold_barcode']) & (df['strand_switch_score'] < df['threshold_strand_switch'])]["read_length"], bins=50, range=(0, alignment_scores_hist_max))
         qc['alignment_scores_hist'][0,1].set_title('Passed Barcode, failed Strand Switch', {'fontsize': 10})
-        qc['alignment_scores_hist'][1,0].hist(df[(df['barcode_score'] < 60) & (df['strand_switch_score'] >= 20)]["read_length"], bins=50, range=(0, alignment_scores_hist_max))
+        qc['alignment_scores_hist'][1,0].hist(df[(df['barcode_score'] < df['threshold_barcode']) & (df['strand_switch_score'] >= df['threshold_strand_switch'])]["read_length"], bins=50, range=(0, alignment_scores_hist_max))
         qc['alignment_scores_hist'][1,0].set_title('Failed Barcode, passed Strand Switch', {'fontsize': 10})
-        qc['alignment_scores_hist'][1,1].hist(df[(df['barcode_score'] < 60) & (df['strand_switch_score'] < 20)]["read_length"], bins=50, range=(0, alignment_scores_hist_max))
+        qc['alignment_scores_hist'][1,1].hist(df[(df['barcode_score'] < df['threshold_barcode']) & (df['strand_switch_score'] < df['threshold_strand_switch'])]["read_length"], bins=50, range=(0, alignment_scores_hist_max))
         qc['alignment_scores_hist'][1,1].set_title('Failed Barcode and Strand Switch', {'fontsize': 10})
         
         
-        qc['passed_barcode_passed_strand_switch'] = len(df[(df['barcode_score'] >= 60) & (df['strand_switch_score'] >= 20)])
-        qc['passed_barcode_failed_strand_switch'] = len(df[(df['barcode_score'] >= 60) & (df['strand_switch_score'] < 20)])
-        qc['failed_barcode_passed_strand_switch'] = len(df[(df['barcode_score'] < 60) & (df['strand_switch_score'] >= 20)])
-        qc['failed_barcode_failed_strand_switch'] = len(df[(df['barcode_score'] < 60) & (df['strand_switch_score'] < 20)])
+        qc['passed_barcode_passed_strand_switch'] = len(df[(df['barcode_score'] >= df['threshold_barcode']) & (df['strand_switch_score'] >= df['threshold_strand_switch'])])
+        qc['passed_barcode_failed_strand_switch'] = len(df[(df['barcode_score'] >= df['threshold_barcode']) & (df['strand_switch_score'] < df['threshold_strand_switch'])])
+        qc['failed_barcode_passed_strand_switch'] = len(df[(df['barcode_score'] < df['threshold_barcode']) & (df['strand_switch_score'] >= df['threshold_strand_switch'])])
+        qc['failed_barcode_failed_strand_switch'] = len(df[(df['barcode_score'] < df['threshold_barcode']) & (df['strand_switch_score'] < df['threshold_strand_switch'])])
         
         for barcode in df['primer_name'].drop_duplicates() :
             qc[str(barcode + '_count')] = len(df[df['primer_name'] == barcode])
