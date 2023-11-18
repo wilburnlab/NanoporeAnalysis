@@ -51,10 +51,9 @@ def read_fastx(file_name: str | Path,
                 else : 
                     seq_dict[name] = { 'Sequence' : sequence, 'Score' : score }
                     
-        
     # Ensure there are sequences in the file
     if not seq_dict:
-        raise FileContentsError(f'No sequences found in FASTA file: "{file_name}"')
+        raise FileContentsError(f'No sequences found in FAST{mode.upper()} file: {file_name}')
     
     return seq_dict
 
