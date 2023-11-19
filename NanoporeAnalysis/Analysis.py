@@ -280,7 +280,7 @@ class ONTanalysis :
 
         for category in seq_by_barcode.keys():
             fasta_file = Path(self.path_fasta) / (category + '.fa')
-            local_io.write_fasta(fasta_file, seq_by_barcode[category], mode='w')
+            local_io.write_fasta(fasta_file, seq_by_barcode[category], append=False)
             df = pd.DataFrame.from_dict(data_by_barcode[category], orient = 'index')
             df.to_csv(str(self.path_debarcoded + '/' + category + '.csv'), header=True, index_label='read_id')
         
