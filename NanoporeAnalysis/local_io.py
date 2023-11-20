@@ -51,44 +51,52 @@ def read_fastx(file_name: str | Path,
                 else : 
                     seq_dict[name] = { 'Sequence' : sequence, 'Score' : score }
                     
-        
     # Ensure there are sequences in the file
     if not seq_dict:
-        raise FileContentsError(f'No sequences found in FASTA file: "{file_name}"')
+        raise FileContentsError(f'No sequences found in FAST{mode.upper()} file: {file_name}')
     
     return seq_dict
 
 
 def write_fasta(file_name: str | Path, 
                 seq_dict: dict,
-                nchars: int = 80,
-                mode: str = 'w'):
-    """Write a dict of sequences to a multipart FASTA file.
+                chars_per_line: int = None,
+                append: bool = False,
+                reduced_name: bool = False):
+    # DBW comment 11/18/23
+    # The "mode" variable was replaced with "append" to be more independently descriptive and not rely on the syntax 
+    # of the open function. I had to change line 283 in Analysis.py that used this. Also, nchars has been replaced 
+    # with chars_per_line and is now also togglable, so that we have the option to produce fasta files with no line 
+    # breaks in the sequence. The 80 bases per line norm is a relic of when the FASTA format was originally defined 
+    # back in the ~1980s and terminal widths were fixed size, and I don't know of any modern software packages that
+    # require fixed width data. It's a good feature to keep for flexibility and visualization. I also added a
+    # "reduced_name" (often useful when dealing with Uniprot-style data)
+    '''
+    Write a dict of sequences to a multipart FASTA file.
     
     Args:
         file_name (str or Path): destination file.
         seq_dict (dict): Keys are sequence names and values are the 
             corresponding sequences.
-        nchars (int): max number of characters on every line of the FASTA file.
-            Defaults to 80.
-        mode (str): parameter to pass to the open() function. If 'w', overwrites
-            the file; if 'a', appends to an existing file. Defaults to 'w'.
-        
+        chars_per_line (int): max number of characters on every line of the FASTA file.
+            Defaults to None (no split per line).
+        append (bool): sets parameter to pass to the open() function. If False, mode='w' and overwrites
+            the file; if True, then mode='a' and appends to an existing file. Defaults to False.  
+    
     Returns:
         None
-    
-    """
-    
+    '''
+    mode = 'a' if append else 'w'
     file_name = Path(file_name)
-    
-    
-    with open(file_name, mode) as f:
+    fout = open( file_name, mode )
+    with open(file_name, mode) as fout:
         for name, seq in seq_dict.items():
-            f.write('>' + name + '\n')
-
-            for i in range (len(seq) // nchars + 1):
-                f.write(seq[i*nchars:(i+1)*nchars] + '\n')
-    return
+            if reduced_name:
+                name = name.split(' ')[0]
+            if chars_per_line:
+                seq = '\n'.join([seq[i:i+chars_per_line] for i in range(0,len(seq),chars_per_line)])
+            fout.write(f'>{name}\n{seq}\n')
+    return None
             
 '''           
             
