@@ -300,7 +300,7 @@ def debarcode(path_barcodes, strand_switch_primer, path_out, path_fastq=None, ov
 
     for category in seq_by_barcode.keys():
         fasta_file = Path(path_out + '/fasta') / (category + '.fa')
-        local_io.write_fasta(fasta_file, seq_by_barcode[category], append=False)
+        local_io.write_fasta(fasta_file, seq_by_barcode[category], mode='w')
         df = pd.DataFrame.from_dict(data_by_barcode[category], orient = 'index')
         df.to_csv(str(path_out + '/debarcoded' + '/' + category + '.csv'), header=True, index_label='read_id')
 
