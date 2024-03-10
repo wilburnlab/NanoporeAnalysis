@@ -21,6 +21,7 @@ from NanoporeAnalysis import utils
 from NanoporeAnalysis import align
 from pod5.tools import pod5_view
 from pod5.tools import pod5_subset
+from pod5.tools import pod5_filter
 from importlib import reload
 reload(align)
 
@@ -55,7 +56,7 @@ Analysis functions:
     PCA
 """
 
-def run_dorado_slurm(path_dorado, path_model, path_out, path_data, account, mail, workers=1, overwrite=False, skip_split=False) :
+def run_dorado_slurm(path_dorado, path_model, path_out, path_data, account, mail, workers=1, threads=1, overwrite=False, skip_split=False) :
     """
     For running dorado through SLURM cluster job scheduling.
     """
@@ -63,44 +64,59 @@ def run_dorado_slurm(path_dorado, path_model, path_out, path_data, account, mail
         if not ( Path(path_data).is_dir() or os.listdir(path_data) ) :
             raise FileNotFoundError("Error: Data path is invalid or doesn't exist. Please point to an existing directory containing data.")
     
-    Path(path_out + '/pod5_bam').mkdir(parents=True, exist_ok=True)
+    Path(path_out + '/pod5_sam').mkdir(parents=True, exist_ok=True)
     Path(path_out + '/fastq').mkdir(parents=True, exist_ok=True)
-    Path(path_out + '/split_pod5s').mkdir(parents=True, exist_ok=True)
     Path(path_out + '/logs').mkdir(parents=True, exist_ok=True)
 
-    if (os.listdir(path_out + '/split_pod5s') or os.listdir(path_out + '/fastq')) and overwrite == False :
-        raise FileExistsError("Error: output path (fastq or pod5_bam) may contain data. Please point to a fresh directory or specify overwrite=True")
+    if (os.listdir(path_out + '/pod5s_by_channel') or os.listdir(path_out + '/fastq')) and overwrite == False :
+        raise FileExistsError("Error: output path (fastq or pod5_sam) may contain data. Please point to a fresh directory or specify overwrite=True")
     elif overwrite == True :
         shutil.rmtree(path_out + '/fastq')
-        shutil.rmtree(path_out + '/pod5_bam')
+        shutil.rmtree(path_out + '/pod5_sam')
         Path(path_out + '/fastq').mkdir(parents=True, exist_ok=True)
-        Path(path_out + '/pod5_bam').mkdir(parents=True, exist_ok=True)
+        Path(path_out + '/pod5_sam').mkdir(parents=True, exist_ok=True)
 
     if skip_split == False :
-        if os.listdir(path_out + '/split_pod5s') and overwrite == False :
+        if os.listdir(path_out + '/pod5s_by_channel') and overwrite == False :
             raise FileExistsError("Error: output path (split_pod5s) may contain data. Please point to a fresh directory or specify overwrite=True")
         elif overwrite == True :
-            shutil.rmtree(path_out + '/split_pod5s')
-            Path(path_out + '/split_pod5s').mkdir(parents=True, exist_ok=True)
-        pod5_view.view_pod5([Path(path_data)], Path(path_out), include = "read_id, channel", force_overwrite=True)
-        pod5_subset.subset_pod5([Path(path_data)], Path(path_out + '/split_pod5s'), columns = ["channel"], table = Path(path_out + "/view.txt"))
-        files = [x for x in Path(path_out + '/split_pod5s').iterdir() if x.is_file()]
-        arrays = np.array_split(np.array(files), workers)
+            shutil.rmtree(path_out + '/pod5s_by_channel')
+            Path(path_out + '/pod5s_by_channel').mkdir(parents=True, exist_ok=True)
+        print("started making the table")
+        pod5_view.view_pod5([Path(path_data)], Path(path_out), include = "read_id, channel", force_overwrite=True, threads=threads)
+        print("finished making the table")
+        
+        pod5_view = pd.read_table(Path(path_out + "/view.txt"), sep='\t')
+#         for channel in pod5_view['channel'].unique() :
+#             pod5_view[pod5_view['channel'] == channel]['read_id'].to_csv(Path(path_out + "/view_current.txt"), index = False, sep=' ', header=False)
+#             pod5_filter.filter_pod5([Path(path_data)], Path(path_out + '/split_pod5s'), threads = threads, force_overwrite = True, ids = Path(path_out + "/view.txt"))
+        
+#         pod5_subset.subset_pod5([Path(path_data)], Path(path_out + '/split_pod5s'), threads = threads, force_overwrite = True, columns = ["channel"], table = Path(path_out + "/view.txt"))
+        print("finished subsetting")
+        
+        channel_folders = [x for x in Path(path_out + '/pod5s_by_channel').iterdir() if x.is_dir()]
+        arrays = np.array_split(np.array(channel_folders), workers)
         for i in range(workers) :
             Path(path_out + '/split_pod5s_byworker/' + str(i)).mkdir(parents=True, exist_ok=True)
             for path in arrays[i] :
-                shutil.copy(str(path), str(path_out + '/split_pod5s_byworker/' + str(i)))
-
+                for file in [x for x in path.glob('*') if x.is_file()]:
+                    shutil.copy(str(file), str(path_out + '/split_pod5s_byworker/' + str(i)))
+#     channel_folders = [x for x in Path(path_out + '/pod5s_by_channel').iterdir() if x.is_dir()]
     for i in range(workers) :
         script = [
             '#!/bin/bash\n',
             str('#SBATCH --account=' + account + '\n'),
             str('#SBATCH --job-name=dorado_' + str(i) + '\n'),
-            '#SBATCH --nodes=1 --ntasks-per-node=1 --gpus-per-node=2\n',
+            '#SBATCH --nodes=1\n',
+            '#SBATCH --ntasks=1\n',
+            '#SBATCH --cpus-per-task=2\n',
+            '#SBATCH --mem=20G\n',
+            '#SBATCH --gres=gpu:2\n',
+            '#SBATCH --time=02:00:00\n',
             str('#SBATCH --output=' + path_out + '/logs' + '/dorado_' + str(i) + '.out' + '\n'),
-            '#SBATCH --mail-type=FAIL\n',
+            '#SBATCH --mail-type=None\n',
             str('#SBATCH --mail-user=' + mail + '\n'),
-            str(path_dorado + " duplex " + path_model + ' ' + str(path_out + '/split_pod5s_byworker/' + str(i)) + ' > ' + path_out + '/pod5_bam' + '/' + str(i) + '.bam')
+            str(str(path_dorado) + " duplex " + path_model + ' --emit-sam ' + str(path_out + '/split_pod5s_byworker/' + str(i)) + '.pod5 > ' + str(path_out) + '/pod5_sam' + '/' + str(i) + '.sam')
         ]
         with open(str(path_out + '/logs' + '/dorado_' + str(i) + '.sh'), 'w') as handle:
             handle.writelines(script)
@@ -123,17 +139,17 @@ def run_dorado(path_dorado, path_model, path_out, path_data, workers=1, skip_spl
         if not ( Path(path_data).is_dir() or os.listdir(path_data) ) :
             raise FileNotFoundError("Error: Data path is invalid or doesn't exist. Please point to an existing directory containing data.")
 
-    Path(path_out + '/pod5_bam').mkdir(parents=True, exist_ok=True)
+    Path(path_out + '/pod5_sam').mkdir(parents=True, exist_ok=True)
     Path(path_out + '/fastq').mkdir(parents=True, exist_ok=True)
     Path(path_out + '/split_pod5s').mkdir(parents=True, exist_ok=True)
 
     if (os.listdir(path_out + '/split_pod5s') or os.listdir(path_out + '/fastq')) and overwrite == False :
-        raise FileExistsError("Error: output path (fastq or pod5_bam) may contain data. Please point to a fresh directory or specify overwrite=True")
+        raise FileExistsError("Error: output path (fastq or pod5_sam) may contain data. Please point to a fresh directory or specify overwrite=True")
     elif overwrite == True :
         shutil.rmtree(path_out + '/fastq')
-        shutil.rmtree(path_out + '/pod5_bam')
+        shutil.rmtree(path_out + '/pod5_sam')
         Path(path_out + '/fastq').mkdir(parents=True, exist_ok=True)
-        Path(path_out + '/pod5_bam').mkdir(parents=True, exist_ok=True)
+        Path(path_out + '/pod5_sam').mkdir(parents=True, exist_ok=True)
 
     if skip_split == False :
         if os.listdir(path_out + '/split_pod5s') and overwrite == False :
@@ -151,21 +167,21 @@ def run_dorado(path_dorado, path_model, path_out, path_data, workers=1, skip_spl
                 shutil.copy(str(path), str(path_out + '/split_pod5s_byworker/' + str(i)))
 
     for i in range(workers) :
-        args = [str(path_dorado + " duplex " + path_model + ' ' + str(path_out + '/split_pod5s_byworker/' + str(i)) + ' > ' + path_out + '/pod5_bam' + '/' + str(i) + '.bam')]
+        args = [str(path_dorado + " duplex " + path_model + ' ' + str(path_out + '/split_pod5s_byworker/' + str(i)) + ' > ' + path_out + '/pod5_sam' + '/' + str(i) + '.bam')]
         subprocess.run(args, shell=True)
 
-    files = [x for x in Path(path_out + '/pod5_bam').iterdir() if x.is_file()]
-    Path(path_out + '/pod5_bam' + '/sorted_by_name/').mkdir(parents=True, exist_ok=True)
+    files = [x for x in Path(path_out + '/pod5_sam').iterdir() if x.is_file()]
+    Path(path_out + '/pod5_sam' + '/sorted_by_name/').mkdir(parents=True, exist_ok=True)
     
     for file in files : 
         print("converting ", file, " to fastq")
-        pysam.sort('-o', str(path_out + '/pod5_bam' + '/sorted_by_name/' + file.stem + '_sorted.bam'), '-n', str(file) )
+        pysam.sort('-o', str(path_out + '/pod5_sam' + '/sorted_by_name/' + file.stem + '_sorted.bam'), '-n', str(file) )
         Path(str(path_out + '/fastq' + '/'+ file.stem + '.fq')).touch()
-        pysam.fastq('-0', str(path_out + '/fastq' + '/'+ file.stem + '.fq'), '-T', 'dx', str(path_out + '/pod5_bam' + '/sorted_by_name/' + file.stem + '_sorted.bam'))
+        pysam.fastq('-0', str(path_out + '/fastq' + '/'+ file.stem + '.fq'), '-T', 'dx', str(path_out + '/pod5_sam' + '/sorted_by_name/' + file.stem + '_sorted.bam'))
 
     return
 
-def debarcode(path_barcodes, strand_switch_primer, path_out, path_fastq=None, overwrite=False, filter_barcode_score = 0, filter_barcode_distance = 0, filter_strand_switch_score = None, threshold_barcode = None, threshold_strand_switch = None) :
+def debarcode(path_barcodes, strand_switch_primer, path_out, path_fastq=None, overwrite=False, workers=None, filter_barcode_score = 0, filter_barcode_distance = 0, filter_strand_switch_score = None, threshold_barcode = None, threshold_strand_switch = None) :
     """
     aligns barcodes and strand_switch primer, then saves to file by barcode and whether the fliter was met.
 
@@ -224,7 +240,7 @@ def debarcode(path_barcodes, strand_switch_primer, path_out, path_fastq=None, ov
         print('Debarcoding file ' + file_name + ';   File ', files.index(file) + 1, 'out of ', len(files))
         data = local_io.read_fastx(file)
 
-        executor = concurrent.futures.ProcessPoolExecutor()
+        executor = concurrent.futures.ProcessPoolExecutor( max_workers=workers )
         if 'Tags' in data[list(data.keys())[0]].keys() :
             futures = [ executor.submit( align.get_best_barcode, data[read_id]['Sequence'], barcodes_clean, strand_switch_primer, filter_strand_switch_score, read_id, data[read_id]['Tags'], filter_barcode_score, filter_barcode_distance) for read_id in data if not 'dx:i:-1' in data[read_id]['Tags']]
         else :
@@ -242,27 +258,26 @@ def debarcode(path_barcodes, strand_switch_primer, path_out, path_fastq=None, ov
             aligned_reads = []
 
     print("Debarcoded ", read_count, " reads in: ", time.time()-start_time, " sec")
-
-    print("Saving debarcoded reads.")
-
-    start_time = time.time()
-
-    # Initialize data structure for storing results
-    seq_by_barcode = {'unclassified' : {}}
-    data_by_barcode = {'unclassified' : {}}
-
-    for primer_name in barcodes_clean.keys():
-        seq_by_barcode[primer_name] = {}
-        seq_by_barcode[primer_name + '_incomplete'] = {}
-        data_by_barcode[primer_name] = {}
-        data_by_barcode[primer_name + '_incomplete'] = {}
-
+    
     # Classify each sequence based on how well the barcode and opposite primer are aligned
     files_aligned = [str(x) for x in Path(path_out + "/temp_aligned_reads").iterdir() if x.is_file()]
+    
+    print("Sorting and saving debarcoded reads.")
+    
+    for i in range(len(files_aligned)) :
+        
+        seq_by_barcode = {'unclassified' : {}}
+        data_by_barcode = {'unclassified' : {}}
 
-    for file in files_aligned :
-        with open(file, 'rb') as handle:
+        for primer_name in barcodes_clean.keys():
+            seq_by_barcode[primer_name] = {}
+            seq_by_barcode[primer_name + '_incomplete'] = {}
+            data_by_barcode[primer_name] = {}
+            data_by_barcode[primer_name + '_incomplete'] = {}
+
+        with open(files_aligned[i], 'rb') as handle:
             aligned_reads = pickle.load(handle)
+        print("sorting ", i)
 
         for a in aligned_reads:
 
@@ -294,26 +309,18 @@ def debarcode(path_barcodes, strand_switch_primer, path_out, path_fastq=None, ov
                 seq_by_barcode['unclassified'][key] = bio_seq
                 data_by_barcode['unclassified'][key] = a
 
-    start_time = time.time()
+        # Save data into multiple FASTA files
 
-    # Save data into multiple FASTA files
-
-    for category in seq_by_barcode.keys():
-        fasta_file = Path(path_out + '/fasta') / (category + '.fa')
-        local_io.write_fasta(fasta_file, seq_by_barcode[category], append=False)
-        df = pd.DataFrame.from_dict(data_by_barcode[category], orient = 'index')
-        df.to_csv(str(path_out + '/debarcoded' + '/' + category + '.csv'), header=True, index_label='read_id')
-
-    for item in Path(path_out + "/temp_aligned_reads").glob('*') :
-        if item.is_file():
-            item.unlink()
-        elif item.is_dir():
-            shutil.rmtree(item)
-
-    print("Saved to disk in: ", time.time()-start_time, " sec")
+        for category in seq_by_barcode.keys():
+            fasta_file = Path(path_out + '/fasta') / (category + '_' + str(i) + '.fa')
+            local_io.write_fasta(fasta_file, seq_by_barcode[category], append=False)
+            df = pd.DataFrame.from_dict(data_by_barcode[category], orient = 'index')
+            df.to_csv(str(path_out + '/debarcoded' + '/' + category + '_' + str(i) + '.csv'), header=True, index_label='read_id')
+        print("Saved ", i, " to disk")
+        
     return
 
-def minimap2(path_minimap2, path_ref, path_out, overwrite=False, finish=False) :
+def minimap2(path_minimap2, path_ref, path_out, workers = 3, overwrite=False, finish=False) :
     """
     Calls Minimap2 to map all reads in given path based on a given reference. Saves mapped reads into new folder.
 
@@ -323,34 +330,47 @@ def minimap2(path_minimap2, path_ref, path_out, overwrite=False, finish=False) :
 
     Output: None
     """
-    Path(path_out + '/sam').mkdir(parents=True, exist_ok=True)
-    Path(path_out + '/bam').mkdir(parents=True, exist_ok=True)
-    if (os.listdir(path_out + '/sam') or os.listdir(path_out + '/bam')) and overwrite == False and finish == False :
+    Path(path_out + '/combined_sam').mkdir(parents=True, exist_ok=True)
+    Path(path_out + '/combined_bam').mkdir(parents=True, exist_ok=True)
+    if (os.listdir(path_out + '/combined_sam') or os.listdir(path_out + '/combined_bam')) and overwrite == False and finish == False :
         raise FileExistsError("Error: output path may contain data. Please point to a fresh directory or specify overwrite=True")
     elif overwrite == True :
-        shutil.rmtree(path_out + '/sam')
-        shutil.rmtree(path_out + '/bam')
-        Path(path_out + '/sam').mkdir(parents=True, exist_ok=True)
-        Path(path_out + '/bam').mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(path_out + '/combined_sam')
+        shutil.rmtree(path_out + '/combined_bam')
+        Path(path_out + '/combined_sam').mkdir(parents=True, exist_ok=True)
+        Path(path_out + '/combined_bam').mkdir(parents=True, exist_ok=True)
 
     #Minimap2 alignment
     if finish == True :
-        files_ran = [x.stem for x in Path(path_out + '/bam').iterdir() if x.is_file() and x.suffix == '.bam' ]
-        files_debarcoded = [str(x) for x in Path(path_out + '/fasta').iterdir() if x.is_file() and x.suffix == '.fa' and x.stem not in files_ran ]
+        files_ran = [x.stem for x in Path(path_out + '/combined_bam').iterdir() if x.is_file() and x.suffix == '.bam' ]
+        files_debarcoded = [str(x) for x in Path(path_out + '/combined_fasta').iterdir() if x.is_file() and x.suffix == '.fasta' and 'unclassified' not in x.stem and x.stem not in files_ran ]
     else :
-        files_debarcoded = [str(x) for x in Path(path_out + '/fasta').iterdir() if x.is_file() and x.suffix == '.fa' ]
-
-    for file in files_debarcoded :
-        print('mapping file ', Path(file).stem)
-        args = [str(path_minimap2 + ' -ax splice ' + path_ref + ' ' + file + ' > ' + path_out + '/sam' + '/' + Path(file).stem + '.sam')]
-        subprocess.run(args, shell=True)
-        pysam.sort("-o", str(path_out + '/bam' + '/' + Path(file).stem + '.bam'), path_out + '/sam' + '/' + Path(file).stem + '.sam')
-        pysam.index(str(path_out + '/bam' + '/' + Path(file).stem + '.bam'))
+        files_debarcoded = [str(x) for x in Path(path_out + '/combined_fasta').iterdir() if x.is_file() and x.suffix == '.fasta' and 'unclassified' not in x.stem ]
+    
+    executor = concurrent.futures.ProcessPoolExecutor( max_workers = workers )
+    futures = [ executor.submit( minimap2_util, path_minimap2, path_ref, file, path_out ) for file in files_debarcoded]
+    concurrent.futures.wait( futures )
+    
+#     for file in files_debarcoded :
+#         print('mapping file ', Path(file).stem)
+#         args = [str(path_minimap2 + ' -ax splice ' + path_ref + ' ' + file + ' > ' + path_out + '/combined_sam' + '/' + Path(file).stem + '.sam')]
+#         subprocess.run(args, shell=True)
+#         pysam.sort("-o", str(path_out + '/combined_bam' + '/' + Path(file).stem + '.bam'), path_out + '/combined_sam' + '/' + Path(file).stem + '.sam')
+#         pysam.index(str(path_out + '/combined_bam' + '/' + Path(file).stem + '.bam'))
 
     print("Done mapping")
+    
     return
 
-def count_reads(path_bed_file, samples, path_out, count = True, overwrite=False) :
+def minimap2_util(path_minimap2, path_ref, file, path_out) :
+    print('mapping file ', Path(file).stem)
+    args = [str(path_minimap2 + ' -ax splice ' + path_ref + ' ' + file + ' > ' + path_out + '/combined_sam/' + Path(file).stem + '.sam')]
+    subprocess.run(args, shell=True)
+    pysam.sort("-o", str(path_out + '/combined_bam/' + Path(file).stem + '.bam'), path_out + '/combined_sam/' + Path(file).stem + '.sam')
+    pysam.index(str(path_out + '/combined_bam/' + Path(file).stem + '.bam'))
+    return
+
+def count_reads(path_ref_file, samples, path_out, workers = 4, count = True, overwrite=False) :
 
     """
     Makes read counts for mapped reads in path_out against a provided .bed file. Outputs to a new folder.
@@ -363,48 +383,22 @@ def count_reads(path_bed_file, samples, path_out, count = True, overwrite=False)
     """
 
     if count == True :
-        bam_files = [x for x in Path(path_out + '/bam').iterdir() if x.is_file() and x.suffix == '.bam' and x.stem != 'unclassified']
+        bam_files = [ x for x in Path(path_out + '/combined_bam').iterdir() if x.is_file() and x.suffix == '.bam' and x.stem != 'unclassified' and 'incomplete' not in x.stem ]
         start_time = time.time()
         counts = pd.DataFrame()
-        for file in bam_files:
-            print("counting " + file.stem)
-            bam_file = pysam.AlignmentFile(file, 'rb')
-            sample_name = file.stem
-            meta_data = pd.read_csv(path_out + '/debarcoded' + '/' + sample_name + '.csv', dtype={'minimap_alignment' : str}).set_index('read_id') #note: take out dtype argument after rerunning
-            if 'minimap_alignment' in meta_data.columns and overwrite==False :
-                raise ValueError("Counting has already been done for this file. Please set overwrite=True if you'd like to continue.")
-            else :
-                meta_data.drop(columns='minimap_alignment', inplace=True)
-                meta_data.insert(len(meta_data.columns), 'minimap_alignment', 'Not mapped')
-            
-            counts_by_feature = []
-            features = []
-            with open(path_bed_file, 'r') as bed_in:
-                bed_lines = bed_in.readlines()
-            for line in bed_lines :
-                cols = line.split('\t')
-                bam_iter = bam_file.fetch(cols[0], int(cols[1]), int(cols[2]))
-
-                read_count = 0
-                read_seq = []
-                for x in bam_iter:
-                    if not ( x.is_secondary or x.is_supplementary ) :
-                        try :
-                            meta_data.at[x.query_name, 'minimap_alignment'] = [x.reference_name, x.reference_start, x.cigarstring, x.reference_end]
-                            read_count += 1 #some attempts at adding to meta_data raise an error. If these events should still result in an increase to read_count, move this line outside of the try block
-                        except:
-                            pass
-
-                features.append(cols[3])
-                counts_by_feature.append(read_count)
-            KPMR_multiplier = 1000000 / len(meta_data.index)
+        seqs = pd.DataFrame()
+        
+        executor = concurrent.futures.ProcessPoolExecutor( max_workers = workers )
+        futures = [ executor.submit( count_util, file, path_out, path_ref_file, overwrite ) for file in bam_files ]
+        concurrent.futures.wait( futures )
+        
+        for future in futures :
+            result = future.result()
             if counts.empty :
-                counts = pd.DataFrame(data = [counts_by_feature], columns = features, index = [sample_name]).rename_axis('barcode').applymap(lambda x : x * KPMR_multiplier )
+                counts = pd.DataFrame(data = result[0], index = [result[1]] ).rename_axis('barcode')
             else :
-                counts = pd.concat([counts, pd.DataFrame(data = [counts_by_feature], columns = features, index = [sample_name]).rename_axis('barcode').applymap(lambda x : x * KPMR_multiplier )])
-
-            meta_data.to_csv(str(path_out + '/debarcoded' + '/' + sample_name + '.csv'), header=True, index_label='read_id')
-
+                counts = pd.concat([counts, pd.DataFrame(data = result[0], index = [result[1]] ).rename_axis('barcode')])
+        
         counts.to_csv(str(path_out + '/counts.csv'), header=True, index_label='barcode')
         
         print('finished counting in ' + str( time.time()-start_time ) + 'sec')
@@ -416,14 +410,87 @@ def count_reads(path_bed_file, samples, path_out, count = True, overwrite=False)
     for sample in samples :
         for barcode in samples[sample] :
             for index in counts_by_sample.index :
-                if barcode in index :
+                if barcode == index :
                     counts_by_sample.at[index, 'sample'] = sample
-            
+#     print(counts_by_sample)
     counts_by_sample.reset_index().set_index(['sample', 'barcode']).to_csv(str(path_out + '/counts_by_sample.csv'), header=True, index_label=['sample', 'barcode'])
 
     print('done')
 
     return
+
+def count_util(file, path_out, path_ref_file, overwrite) :
+    print("counting " + file.stem)
+    bam_file = pysam.AlignmentFile(file, 'rb')
+    sample_name = file.stem
+    with open(path_out + '/combined_metadata' + '/' + sample_name + '.csv') as handle :
+        total_reads = sum(1 for row in handle) - 1
+    """
+    meta_data = pd.read_csv(path_out + '/combined_metadata' + '/' + sample_name + '.csv', dtype={'minimap_alignment' : str}).set_index('read_id') #note: take out dtype argument after rerunning
+    if 'minimap_alignment' in meta_data.columns and overwrite==False :
+        raise ValueError("Counting has already been done for this file. Please set overwrite=True if you'd like to continue.")
+    elif 'minimap_alignment' in meta_data.columns :
+        meta_data.drop(columns='minimap_alignment', inplace=True)
+        meta_data.insert(len(meta_data.columns), 'minimap_alignment', 'Not mapped')
+    else :
+        meta_data.insert(len(meta_data.columns), 'minimap_alignment', 'Not mapped')"""
+        
+#     total_reads = len(meta_data.index)
+    
+    ref = local_io.read_fastx(path_ref_file)
+    contigs = []
+    counts = {}
+
+    for key in ref.keys() :
+        comma_split = key.split(', ')
+        contig_name_split = comma_split[0].split(' ')
+        contig_id = contig_name_split[0]
+        gene_name = ' '.join(contig_name_split[1:])
+        contigs.append( [ contig_id, gene_name ] )
+        counts[gene_name] = 0
+
+    for contig in contigs :
+        bam_iter = bam_file.fetch(contig[0])
+        read_count = 0
+        for x in bam_iter:
+            if not ( x.is_secondary or x.is_supplementary ) :
+                try :
+#                     meta_data.at[x.query_name, 'minimap_alignment'] = [contig[0] + ' ' + contig[1], x.reference_start, x.cigarstring, x.reference_end]
+                    read_count += 1 #some attempts at adding to meta_data raise an error. If these events should still result in an increase to read_count, move this line outside of the try block
+                except:
+                    pass
+        
+        
+        RPM_multiplier =  total_reads# / 1000000
+        read_count = read_count / RPM_multiplier
+        counts[contig[1]] += read_count
+#         counts_by_feature.append([contig[0], read_count])
+        
+#     with open(path_bed_file, 'r') as bed_in:
+#         bed_lines = bed_in.readlines()
+#     for line in bed_lines :
+#         cols = line.split('\t')
+#         bam_iter = bam_file.fetch(cols[0], int(cols[1]), int(cols[2]))
+        
+#         read_count = 0
+#         read_seq = []
+#         for x in bam_iter:
+#             if not ( x.is_secondary or x.is_supplementary ) :
+#                 try :
+#                     meta_data.at[x.query_name, 'minimap_alignment'] = [cols[3], x.reference_start, x.cigarstring, x.reference_end]
+# #                     seq = x.query_sequence
+# #                     if isinstance(seq, str): # why are some empty?..
+# #                         read_seq.append(' '.join([x.query_name, seq]))
+#                     read_count += 1 #some attempts at adding to meta_data raise an error. If these events should still result in an increase to read_count, move this line outside of the try block
+#                 except:
+#                     pass
+        
+#         read_seq_str = '\n'.join(read_seq)
+#         seqs_by_feature.append(read_seq_str)
+    
+    bam_file.close()
+#     meta_data.to_csv(str(path_out + '/combined_metadata' + '/' + sample_name + '.csv'), header=True, index_label='read_id')
+    return [counts, sample_name]
 
 def qc_metrics(path_out, on='library', samples=None, hist_max=3000) :
     """
@@ -436,7 +503,7 @@ def qc_metrics(path_out, on='library', samples=None, hist_max=3000) :
     Path(path_out + '/qc').mkdir(parents=True, exist_ok=True)
 
     qc = {}
-    files = [str(x) for x in Path(path_out + '/debarcoded').iterdir() if x.is_file()]
+    files = [str(x) for x in Path(path_out + '/combined_metadata').iterdir() if x.is_file()]
     df = pd.DataFrame()
     for file in files :
         df = pd.concat([df, pd.read_csv(file).set_index('read_id')], axis = 0)
@@ -488,11 +555,11 @@ def diff_exp(path_out, samples, meta_data, design_factor) :
     Output:
         Shows resulting volcano plot and saves analysis to file under path_out with a name referring to the samples and design_factor provided.
     """
-    counts_by_sample = pd.read_csv(path_out + '/counts_by_sample.csv', index_col = ['sample', 'barcode'])
-    volcano_data = counts_by_sample[counts_by_sample.min(axis=1) >= 20].loc[:,samples].T
-    print(volcano_data)
+    counts_by_sample = pd.read_csv(path_out + '/counts_by_sample.csv', index_col = ['sample', 'barcode']).reset_index('sample')
+    volcano_data = counts_by_sample[counts_by_sample['sample'].isin(samples)].drop('sample', axis=1)
+    volcano_data = volcano_data.T[volcano_data.min(axis=0) >= 20].T
     volcano_meta = meta_data.loc[samples, :]
-    print(volcano_meta)
+#     print(volcano_meta)
     dds = DeseqDataSet(
         counts=volcano_data,
         metadata=volcano_meta,

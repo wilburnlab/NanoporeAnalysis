@@ -33,11 +33,12 @@ def read_fastx(file_name: str | Path,
         if mode == 'a': # FASTA
             for line in fastx:
                 line = line.rstrip()
-                if line[0] == '>': # New seq
-                    name = line[1:].split(' ')[0] if first_word else line[1:]
-                    seq_dict[name] = ''
-                else:
-                    seq_dict[name] += line
+                if line != '' :
+                    if line[0] == '>': # New seq
+                        name = line[1:].split(' ')[0] if first_word else line[1:]
+                        seq_dict[name] = ''
+                    else:
+                        seq_dict[name] += line
         else: # FASTQ
             while True:
                 name = fastx.readline().rstrip()

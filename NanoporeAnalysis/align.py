@@ -259,13 +259,6 @@ def process_read(read: dict,
     analysis['Delta UMI Score'] = delta_umi_score
     return analysis, forward_analysis, reverse_analysis
 
-
-
-
-
-
-
-
 def align_to_dict(align_result):
     """Convert a skbio.alignment object into a simple dict.
     
@@ -293,7 +286,6 @@ def reverse_alignment(alignment):
     Returns:
         Reverse-complemented dict
     """
-    
     
     alignment_rev = alignment.copy()
     alignment_rev['aligned_query_sequence'] = reverse_complement(alignment['aligned_query_sequence'])
@@ -463,12 +455,13 @@ def get_best_alignment(target_sequence, primers, seq_id='ID_not_specified'):
 
 
 def show_alignment_simple(alignments, line_length=100):
-    """Print a basic text representation of one or more alignments.
+    """
+    Print a basic text representation of one or more alignments. This will account for indels by creating a global reference sequence from all alignments. Aligned portions of each query are shown in uppercase letters and the unaligned regions are shown in lowercase, cut off at the ends of the target sequence to make visualization easy.
     
     Args:
         alignments (dict or list of dicts): One or more alignments, as
             returned by the align_to_dict function. If more than one
-            alignment is given, they must have the same target sequence.
+            alignment is given, they must have the same target sequence (reverse complement is also accepted).
             This can be useful, e.g., for looking at the forward and
             reverse primers aligned to the same sequence.
         line_length (int): Number of characters to print in each line.
@@ -479,32 +472,73 @@ def show_alignment_simple(alignments, line_length=100):
         
     """
     
-    alignments = [alignments] if not isinstance(alignments, list) else alignments 
+    # Assert the input alignments as a list
+    alignments = [alignments] if not isinstance(alignments, list) else alignments
+    ref_target = alignments[0]["target_sequence"]
     
-    ref_target = alignments[0]["target_sequence"] #reference target sequence for all alignments
-    
+    # Set up a variable to hold the aligned queries and targets
     aligned_strings = []
     
+    # Go through each alignment and set up the query and target as aligned strings.
     for alignment in alignments:
         
         # Prepare alignment view
-        align_view = '-' * alignment["target_begin"] + alignment["aligned_query_sequence"]
-        num_trailing_char = len(ref_target) - len(align_view)
-        align_view = align_view + '-' * num_trailing_char
+        # Decide if the query sequence should have a gap, where the target extends beyond the query, or extend the query to the start of the target.
+        if alignment['target_begin'] >= alignment['query_begin'] :
+            align_view_query = ' ' * ( alignment['target_begin'] - alignment['query_begin'] ) + alignment["query_sequence"][:alignment["query_begin"]].lower() + alignment["aligned_query_sequence"].upper()
+        elif alignment['target_begin'] < alignment['query_begin'] :
+            align_view_query = alignment["query_sequence"][alignment['query_begin'] - alignment['target_begin']:alignment["query_begin"]].lower() + alignment["aligned_query_sequence"].upper() + alignment["query_sequence"][ alignment["query_end"] : alignment["query_end"] + len(alignment['target_sequence']) - alignment['target_end_optimal'] ].lower()
+            
+        # Add the unaligned beginning of the target sequence, if needed.
+        align_view_query_target = alignment['target_sequence'][:alignment["target_begin"]] + alignment["aligned_target_sequence"]
         
-        # Take reverse complement of the alignment view if needed        
+        # Add a trailing space if needed to make all sequences a similar length.
+        trailing_char = ' ' * ( len(ref_target) - alignment['target_end_optimal'] )
+        align_view_query = align_view_query + trailing_char
+        align_view_query_target = align_view_query_target + trailing_char
+        
+        # Take reverse complement of the alignment view if needed, and check if target is the same for every alignment.    
         if alignment["target_sequence"] == reverse_complement(ref_target):
-            align_view = reverse_complement(align_view)
-        elif alignment["target_sequence"] != ref_target:
+            align_view_query = reverse_complement(align_view_query)
+            align_view_query_target = reverse_complement(align_view_query_target)
+        elif alignment["target_sequence"].lower() != ref_target.lower():
             raise Exception("Alignments have different target sequences!")
-        aligned_strings.append(align_view)
-
+            
+        # Append both the query and target to the strings holder.
+        aligned_strings.append([align_view_query, align_view_query_target])
+    
+    # Begin setting up a global alignment. Start a residue counter as an index. The aligner will continue through the aligned strings until it reaches the length of the 'blank' ref_target, which will get indels inserted anywhere that an alignment shows one.
+    residue = 0
+    while residue < len(ref_target) :
+        for i in range(len(aligned_strings)) :
+            # If there's an insert at the current index position for any of the aligned target sequences, insert a '-' into the ref_target and any aligned query that doesn't have one there.
+            if aligned_strings[i][1][residue] == '-' :
+                if ref_target[residue] != '-' :
+                    ref_target = ref_target[:residue] + '-' + ref_target[residue:]
+                for j in range(len(aligned_strings)) :
+                    if aligned_strings[j][1][residue] != '-' :
+                        aligned_strings[j][1] = aligned_strings[j][1][:residue] + '-' + aligned_strings[j][1][residue:]
+                        aligned_strings[j][0] = aligned_strings[j][0][:residue] + '-' + aligned_strings[j][0][residue:]
+        residue += 1
+                        
     # Print the reference sequence and aligned targets:
-    for i in range (len(ref_target) // line_length + 1):
+    for i in range( (len(ref_target) // line_length ) + 1) :
+        #Print the global target sequence.
         print(ref_target[i*line_length:(i+1)*line_length])
         
-        for aligned_string in aligned_strings:
-            print(aligned_string[i*line_length:(i+1)*line_length])
+        # Set up a blank boolean to mark whether or not the current line has any actual aligned sequences or if no sequences (included unaligned regions) show up yet. Also create a print holder variable to hold the seq until after everything has been tested to be blank or not.
+        blank = True
+        aligned_prints = []
+        for aligned_string in aligned_strings :
+            line = aligned_string[0][i*line_length:(i+1)*line_length]
+            aligned_prints.append(line)
+            # If any alignment has something in this line, mark blank as False.
+            if line.replace(' ', '') != str('') :
+                blank = False
+        if blank == False : 
+            for line in aligned_prints :
+                print(line)
+        # Print a gap
         print(' '*line_length)
-    
+        
     return
