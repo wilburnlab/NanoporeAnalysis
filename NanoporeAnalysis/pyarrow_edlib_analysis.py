@@ -54,7 +54,8 @@ def build_parquet_dataset_from_sam(sam_folder, path_dataset) :
         sam_to_parquet(file, path_dataset, basename_template = str(file.stem + '_part-{i}.parquet'))
     return 'done'
 
-def find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_length=0) :
+ef find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_length=0) :
+    
     matches = []
     target_seq_len = len(target_seq)
     query_seq_len = len(query_seq)
@@ -63,7 +64,7 @@ def find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_len
     for location in for_alignment['locations'] :
         alignment_length = abs(location[0] - location[1])
         if for_alignment['editDistance'] <= max_edit_distance and alignment_length >= min_length :
-            score = for_alignment['editDistance'] + query_seq_len - alignment_length / query_seq_len
+            score = ( for_alignment['editDistance'] + query_seq_len - alignment_length ) / query_seq_len
             matches.append({
                 'query_ID' : query_ID,
                 'edit_distance' : for_alignment['editDistance'],
@@ -74,31 +75,36 @@ def find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_len
     for location in rev_alignment['locations'] :
         alignment_length = abs(location[0] - location[1])
         if rev_alignment['editDistance'] <= max_edit_distance and alignment_length >= min_length :
-            score = rev_alignment['editDistance'] + query_seq_len - alignment_length / query_seq_len
+            score = ( rev_alignment['editDistance'] + query_seq_len - alignment_length ) / query_seq_len
             matches.append({
                 'query_ID' : query_ID,
                 'edit_distance' : rev_alignment['editDistance'],
                 'edit_score' : score,
-                'location' : [ target_seq_len - location[0], target_seq_len - location[1] ],
+                'location' : [ target_seq_len - location[1], target_seq_len - location[0] ],
                 'direction' : 'reverse'
             })
     return matches
 
-def pick_best_match(matches) :
+def pick_best_match(matches, min_match_location = 0) :
     best_match = {
+        'query_ID' : 'None matched',
+        'edit_distance' : 0,
         'edit_score' : 1000,
+        'location' : [0,0],
+        'direction' : 'None'
     }
     for match in matches :
-        if match['edit_score'] < best_match['edit_score'] :
-            best_match = match
-        elif match['edit_score'] == best_match['edit_score'] :
-            best_match = {
-                'query_ID' : 'Multiple',
-                'edit_distance' : 1000,
-                'edit_score' : match['edit_score'],
-                'location' : [-1, -1],
-                'direction' : 'None'
-            }
+        if match['location'][0] >= min_match_location :
+            if match['edit_score'] < best_match['edit_score'] :
+                best_match = match
+            elif match['edit_score'] == best_match['edit_score'] :
+                best_match = {
+                    'query_ID' : 'Multiple',
+                    'edit_distance' : 1000,
+                    'edit_score' : match['edit_score'],
+                    'location' : [-1, -1],
+                    'direction' : 'None'
+                }
     return best_match
 
 def evaluate_barcode_SSP_pair(barcode_match, SSP_match, max_gap = 5) :
@@ -129,7 +135,9 @@ def parse_SSP_and_barcode(seq, barcodes, SSP, max_barcode_score, max_SSP_score, 
     for barcode in barcodes :
         tmp_barcode_matches = find_seq_matches(seq, barcode[1], max_barcode_score, barcode[0], min_length = min_length_barcode)
         if len(tmp_barcode_matches) > 0 :
-            barcode_matches.append(pick_best_match(tmp_barcode_matches))
+            for barcode_match in tmp_barcode_matches :
+                barcode_matches.append(barcode_match)
+                
     barcode_SSP_pair = {
         'barcode_ID' : 'None matched',
         'barcode_UMI_start' : 0,
@@ -149,12 +157,12 @@ def parse_SSP_and_barcode(seq, barcodes, SSP, max_barcode_score, max_SSP_score, 
                     barcode_SSP_pair = barcode_SSP_evaluation
                 elif barcode_SSP_evaluation['combined_score'] == barcode_SSP_pair['combined_score'] :
                     barcode_SSP_pair['barcode_ID'] = 'Multiple'
-                    barcode_SSP_pair['barcode_ID'] = barcode_SSP_evaluation['combined_score']
+                    barcode_SSP_pair['combined_score'] = barcode_SSP_evaluation['combined_score']
     
     if barcode_SSP_pair['direction'] == 'reverse' :
         seq = utils.reverse_complement(seq)
     elif barcode_SSP_pair['barcode_ID'] == 'None matched' and len(barcode_matches) > 0 :
-        best_barcode = pick_best_match(barcode_matches)
+        best_barcode = pick_best_match(barcode_matches, seq_len * 0.7)
         barcode_SSP_pair['barcode_ID'] = best_barcode['query_ID']
         barcode_SSP_pair['barcode_UMI_start'] = best_barcode['location'][0]
         barcode_SSP_pair['barcode_UMI_end'] = best_barcode['location'][1]
@@ -167,7 +175,7 @@ def parse_SSP_and_barcode(seq, barcodes, SSP, max_barcode_score, max_SSP_score, 
         'SSP_edit_distance' : 1000,
     }
     for SSP_match in SSP_matches :
-        if SSP_match['direction'] != barcode_SSP_pair['direction'] :
+        if SSP_match['direction'] != barcode_SSP_pair['direction'] and SSP_match['location'][1] < barcode_SSP_pair['barcode_UMI_start'] :
             if SSP_match['edit_score'] < distal_SSP['SSP_edit_distance'] :
                 distal_SSP['SSP_start'] = SSP_match['location'][0]
                 distal_SSP['SSP_end'] = SSP_match['location'][1]
@@ -177,10 +185,9 @@ def parse_SSP_and_barcode(seq, barcodes, SSP, max_barcode_score, max_SSP_score, 
                 distal_SSP['SSP_end'] = SSP_match['location'][1]
                 distal_SSP['SSP_edit_distance'] = SSP_match['edit_distance']
     
-    
     parsed = barcode_SSP_pair
     parsed.update(distal_SSP)
-    if parsed['barcode_UMI_start'] - parsed['SSP_end'] > seq_len * 0.5 :
+    if parsed['barcode_UMI_start'] - parsed['SSP_end'] > seq_len * 0.5 and parsed['barcode_SSP_start'] != 0 :
         parsed['biological_seq_indices'] = [ parsed['SSP_end'], parsed['barcode_UMI_start'] ]
     else :
         parsed['biological_seq_indices'] = [ 0, seq_len - 1 ]
@@ -212,26 +219,63 @@ def debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_
         table = table.append_column(key, [parsed_seqs[key]])
     return table
 
-def debarcode_table_from_file(file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0) :
+def debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0) :
+    seqs = table.column('seq')
+    duplex_tags = table.column('dx:i')
+    parsed_seqs = {
+        'barcode_ID' : [],
+        'barcode_UMI_start' : [],
+        'barcode_UMI_end' : [],
+        'barcode_UMI_edit_distance' : [],
+        'barcode_SSP_start' : [],
+        'barcode_SSP_end' : [],
+        'barcode_SSP_edit_distance' : [],
+        'combined_score' : [],
+        'direction' : [],
+        'SSP_start' : [],
+        'SSP_end' : [],
+        'SSP_edit_distance' : [],
+        'biological_seq_indices' : []
+    }
+    for i in range(len(seqs)) :
+        parsed_seq = parse_SSP_and_barcode(str(seqs[i]), barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP)
+        for key in parsed_seqs :
+            parsed_seqs[key].append(parsed_seq[key])
+    for key in parsed_seqs :
+        table = table.append_column(key, [parsed_seqs[key]])
+    return table
+
+def debarcode_table_from_file(file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0, resume=False, overwrite=False) :
     table = pq.read_table(file)
     if 'barcode_ID' in table.column_names :
-        table = table.drop_columns([
-            'barcode_ID',
-            'barcode_UMI_start',
-            'barcode_UMI_end',
-            'barcode_UMI_edit_distance',
-            'barcode_SSP_start',
-            'barcode_SSP_end',
-            'barcode_SSP_edit_distance',
-            'combined_score',
-            'direction',
-            'SSP_start',
-            'SSP_end',
-            'SSP_edit_distance',
-            'biological_seq_indices'
-        ])
+        if resume == True :
+            print('skip resume', file)
+            print(table.column_names)
+            del table
+            return
+        elif overwrite == True :
+            table = table.drop_columns([
+                'barcode_ID',
+                'barcode_UMI_start',
+                'barcode_UMI_end',
+                'barcode_UMI_edit_distance',
+                'barcode_SSP_start',
+                'barcode_SSP_end',
+                'barcode_SSP_edit_distance',
+                'combined_score',
+                'direction',
+                'SSP_start',
+                'SSP_end',
+                'SSP_edit_distance',
+                'biological_seq_indices'
+            ])
+        else :
+            print('skip no overwrite', file)
+            del table
+            return
     table = debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP)
     pq.write_table(table, file)
+    del table
     print(file)
     return
 
@@ -243,11 +287,14 @@ def load_barcodes(path) :
             barcodes.append([line_split[0], utils.reverse_complement(line_split[2])])
     return barcodes
 
-def debarcode(dataset_dir, barcode_path, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0, workers=4) :
+def debarcode(dataset_dir, barcode_path, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0, workers=4, resume=False, overwrite=False ) :
     barcodes = load_barcodes(barcode_path)
     files = [x for x in Path(dataset_dir).iterdir() if x.is_file()]
-    for file in files :
-        executor = concurrent.futures.ProcessPoolExecutor( max_workers=workers )
-        futures = [ executor.submit( debarcode_table_from_file, file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP) for file in files]
-        concurrent.futures.wait( futures )
+    split = math.ceil( len(files) / workers )
+    files_chunks = np.array_split(np.array(files), split)
+    for chunk in files_chunks : 
+#         debarcode_table_from_file( file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP, resume, overwrite )
+        with concurrent.futures.ProcessPoolExecutor( max_workers=workers ) as executor :
+            futures = [ executor.submit( debarcode_table_from_file, file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP, resume, overwrite ) for file in chunk]
+            concurrent.futures.wait( futures )
     return
