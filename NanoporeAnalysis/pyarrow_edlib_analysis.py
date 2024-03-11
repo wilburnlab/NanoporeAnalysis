@@ -16,7 +16,6 @@ def pod5_split() :
     return
 
 def sam_to_parquet(file, path_dataset, basename_template = None, sam_or_bam = 'sam') :
-    
     table_dict = {
         'ID' : [],
         'seq' : [],
@@ -26,7 +25,6 @@ def sam_to_parquet(file, path_dataset, basename_template = None, sam_or_bam = 's
     table_dict_keys = table_dict.keys()
     tag_names = []
     with open(file, 'r') as handle :
-        i = 0
         for line in handle.readlines() :
             if line[0] != '@' :
                 line_split = line.split('\t')
@@ -34,7 +32,7 @@ def sam_to_parquet(file, path_dataset, basename_template = None, sam_or_bam = 's
                 
                 line_dict['ID'] = line_split[0]
                 line_dict['seq'] = line_split[9]
-                line_dict['seq_len'] = len(seq)
+                line_dict['seq_len'] = len(line_dict['seq'])
                 line_dict['qual'] = line_split[10]
                 
                 for tag in line_split[11:] :
@@ -46,7 +44,6 @@ def sam_to_parquet(file, path_dataset, basename_template = None, sam_or_bam = 's
                     if key not in table_dict_keys :
                         table_dict[key] = pa.nulls(i).to_pylist()
                     table_dict[key].append(line_dict[key])
-                i+=1
     table = pa.table(table_dict)
     dataset.write_dataset(table, Path(path_out + '/pa_dataset'), format='parquet', basename_template = basename_template, max_rows_per_file = 200000, max_rows_per_group = 200000, existing_data_behavior='overwrite_or_ignore')
     return 'done'
@@ -57,166 +54,136 @@ def build_parquet_dataset_from_sam(sam_folder, path_dataset) :
         sam_to_parquet(file, path_dataset, basename_template = str(file.stem + '_part-{i}.parquet'))
     return 'done'
 
-def find_seq_matches(target_seq, query_seq, max_edit_distance, min_length=0) :
-    
+def find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_length=0) :
     matches = []
+    target_seq_len = len(target_seq)
+    query_seq_len = len(query_seq)
     for_alignment = edlib.align(query_seq, target_seq, mode='HW', task='path')
     rev_alignment = edlib.align(utils.reverse_complement(query_seq), target_seq, mode='HW', task='path')
     for location in for_alignment['locations'] :
-        length = abs(location[0] - location[1])
-        if for_alignment['editDistance'] <= max_edit_distance and length >= min_length :
+        alignment_length = abs(location[0] - location[1])
+        if for_alignment['editDistance'] <= max_edit_distance and alignment_length >= min_length :
+            score = for_alignment['editDistance'] + query_seq_len - alignment_length / query_seq_len
             matches.append({
+                'query_ID' : query_ID,
                 'edit_distance' : for_alignment['editDistance'],
-                'edit_score' : for_alignment['editDistance'] / length,
-                'location' : location, 
+                'edit_score' : score,
+                'location' : location,
                 'direction' : 'forward'
             })
     for location in rev_alignment['locations'] :
-        length = abs(location[0] - location[1])
-        if rev_alignment['editDistance'] <= max_edit_distance and length >= min_length :
+        alignment_length = abs(location[0] - location[1])
+        if rev_alignment['editDistance'] <= max_edit_distance and alignment_length >= min_length :
+            score = rev_alignment['editDistance'] + query_seq_len - alignment_length / query_seq_len
             matches.append({
+                'query_ID' : query_ID,
                 'edit_distance' : rev_alignment['editDistance'],
-                'edit_score' : for_alignment['editDistance'] / length,
-                'location' : location, 
+                'edit_score' : score,
+                'location' : [ target_seq_len - location[0], target_seq_len - location[1] ],
                 'direction' : 'reverse'
             })
     return matches
-def find_barcode_SSP_pairs(barcode_matches, barcode_ID, SSP_match, max_gap = 5) :
-    barcode_SSP_pairs = []
-    for barcode_match in barcode_matches :
-        
-        barcode_start = barcode_match['location'][0]
-        barcode_end = barcode_match['location'][1]
-        SSP_start = SSP_match['location'][0]
-        SSP_end = SSP_match['location'][1]
-        
-        forward_pair_gap = abs(SSP_start - barcode_end  )
-        reverse_pair_gap = abs( barcode_start - SSP_end)
-        if forward_pair_gap <= max_gap and barcode_match['direction'] == 'forward' and SSP_match['direction'] == 'forward' :
-            barcode_SSP_pairs.append({
-                'barcode_ID' : barcode_ID,
-                'barcode_start' : barcode_start,
-                'barcode_end' : barcode_end,
-                'barcode_score' : barcode_match['edit_distance'],
-                'SSP_start' : SSP_start,
-                'SSP_end' : SSP_end,
-                'SSP_score' : SSP_match['edit_distance'],
-                'combined_score' : barcode_match['edit_score'] + SSP_match['edit_score'],
-                'direction' : 'forward'
-            })
-        elif reverse_pair_gap <= max_gap and barcode_match['direction'] == 'reverse' and SSP_match['direction'] == 'reverse' :
-            barcode_SSP_pairs.append({
-                'barcode_ID' : barcode_ID,
-                'barcode_start' : barcode_start,
-                'barcode_end' : barcode_end,
-                'barcode_score' : barcode_match['edit_distance'],
-                'SSP_start' : SSP_start,
-                'SSP_end' : SSP_end,
-                'SSP_score' : SSP_match['edit_distance'],
-                'combined_score' : barcode_match['edit_score'] + SSP_match['edit_score'],
-                'direction' : 'reverse'
-            })
-    
-    return barcode_SSP_pairs
 
-def parse_SSP_and_barcode(seq, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap = 5, min_length_barcode=0, min_length_SSP=0) :
-    
+def pick_best_match(matches) :
+    best_match = {
+        'edit_score' : 1000,
+    }
+    for match in matches :
+        if match['edit_score'] < best_match['edit_score'] :
+            best_match = match
+        elif match['edit_score'] == best_match['edit_score'] :
+            best_match = {
+                'query_ID' : 'Multiple',
+                'edit_distance' : 1000,
+                'edit_score' : match['edit_score'],
+                'location' : [-1, -1],
+                'direction' : 'None'
+            }
+    return best_match
+
+def evaluate_barcode_SSP_pair(barcode_match, SSP_match, max_gap = 5) :
+    barcode_start = barcode_match['location'][0]
+    barcode_end = barcode_match['location'][1]
+    SSP_start = SSP_match['location'][0]
+    SSP_end = SSP_match['location'][1]
+    barcode_SSP_pair = None
+    pair_gap = abs(SSP_start - barcode_end)
+    if pair_gap <= max_gap and barcode_match['direction'] == SSP_match['direction'] :
+        barcode_SSP_pair = {
+            'barcode_ID' : barcode_match['query_ID'],
+            'barcode_UMI_start' : barcode_start,
+            'barcode_UMI_end' : barcode_end,
+            'barcode_UMI_edit_distance' : barcode_match['edit_distance'],
+            'barcode_SSP_start' : SSP_start,
+            'barcode_SSP_end' : SSP_end,
+            'barcode_SSP_edit_distance' : SSP_match['edit_distance'],
+            'combined_score' : barcode_match['edit_score'] + SSP_match['edit_score'],
+            'direction' : barcode_match['direction']
+        }
+    return barcode_SSP_pair
+
+def parse_SSP_and_barcode(seq, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap = 5, min_length_barcode = 0, min_length_SSP = 0) :
     seq_len = len(seq)
-    barcode_SSP_pairs = []
-    distal_SSP = {
-        'edit_distance' : 'None',
-        'location' : ['None', 'None'],
+    SSP_matches = find_seq_matches(seq, SSP, max_SSP_score, 'SSP', min_length = min_length_SSP)
+    barcode_matches = []
+    for barcode in barcodes :
+        tmp_barcode_matches = find_seq_matches(seq, barcode[1], max_barcode_score, barcode[0], min_length = min_length_barcode)
+        if len(tmp_barcode_matches) > 0 :
+            barcode_matches.append(pick_best_match(tmp_barcode_matches))
+    barcode_SSP_pair = {
+        'barcode_ID' : 'None matched',
+        'barcode_UMI_start' : 0,
+        'barcode_UMI_end' : 0,
+        'barcode_UMI_edit_distance' : 0,
+        'barcode_SSP_start' : 0,
+        'barcode_SSP_end' : 0,
+        'barcode_SSP_edit_distance' : 0,
+        'combined_score' : 1000,
         'direction' : 'None'
     }
-    SSP_matches = find_seq_matches(seq, SSP, max_SSP_score, min_length = min_length_SSP)
-    if SSP_matches == [] :
-        SSP_matches.append({
-            'edit_distance' : 100,
-            'location' : [0, seq_len], 
-            'direction' : 'reverse'
-        })
-    for barcode in barcodes :
-        barcode_matches = find_seq_matches(seq, barcode[1], max_barcode_score, min_length = min_length_barcode)
+    for barcode_match in barcode_matches :
         for SSP_match in SSP_matches :
-            for pair in find_barcode_SSP_pairs(barcode_matches, barcode[0], SSP_match, max_gap) :
-                barcode_SSP_pairs.append(pair)
-                
-    barcode_SSP_pair = {
-        'combined_score' : 100,
-        'barcode_ID' : 'None'
+            barcode_SSP_evaluation = evaluate_barcode_SSP_pair(barcode_match, SSP_match, max_gap)
+            if barcode_SSP_evaluation != None :
+                if barcode_SSP_evaluation['combined_score'] < barcode_SSP_pair['combined_score'] :
+                    barcode_SSP_pair = barcode_SSP_evaluation
+                elif barcode_SSP_evaluation['combined_score'] == barcode_SSP_pair['combined_score'] :
+                    barcode_SSP_pair['barcode_ID'] = 'Multiple'
+                    barcode_SSP_pair['barcode_ID'] = barcode_SSP_evaluation['combined_score']
+    
+    if barcode_SSP_pair['direction'] == 'reverse' :
+        seq = utils.reverse_complement(seq)
+    elif barcode_SSP_pair['barcode_ID'] == 'None matched' and len(barcode_matches) > 0 :
+        best_barcode = pick_best_match(barcode_matches)
+        barcode_SSP_pair['barcode_ID'] = best_barcode['query_ID']
+        barcode_SSP_pair['barcode_UMI_start'] = best_barcode['location'][0]
+        barcode_SSP_pair['barcode_UMI_end'] = best_barcode['location'][1]
+        barcode_SSP_pair['barcode_UMI_edit_distance'] = best_barcode['edit_distance']
+        barcode_SSP_pair['direction'] = best_barcode['direction']
+    
+    distal_SSP = {
+        'SSP_start' : 0,
+        'SSP_end' : 0,
+        'SSP_edit_distance' : 1000,
     }
-    for pair in barcode_SSP_pairs :
-        if pair['combined_score'] < barcode_SSP_pair['combined_score'] :
-            barcode_SSP_pair = pair
-        elif pair['combined_score'] == barcode_SSP_pair['combined_score'] :
-            barcode_SSP_pair['barcode_ID'] = 'Multiple'
-            
-    if barcode_SSP_pair['barcode_ID'] not in ['Multiple', 'None']  :
-        if barcode_SSP_pair['direction'] == 'reverse' :
-            seq = utils.reverse_complement(seq)
-            barcode_start = seq_len - barcode_SSP_pair['barcode_end']
-            SSP_end = seq_len - barcode_SSP_pair['SSP_start']
-            
-            for possible_distal_SSP_match in SSP_matches :
-                if possible_distal_SSP_match['direction'] == 'forward' and possible_distal_SSP_match['location'][0] > barcode_SSP_pair['barcode_end'] :
-                    location = [ seq_len - possible_distal_SSP_match['location'][1], seq_len - possible_distal_SSP_match['location'][0] ]
-                    possible_distal_SSP_match = {
-                        'edit_distance' : possible_distal_SSP_match['edit_distance'],
-                        'location' : location,
-                        'direction' : 'forward'
-                    }
-                    if distal_SSP['edit_distance'] == 'None' :
-                        distal_SSP = possible_distal_SSP_match
-                    elif distal_SSP['edit_distance'] > possible_distal_SSP_match['edit_distance'] :
-                        distal_SSP = possible_distal_SSP_match
-                    elif distal_SSP['location'][0] > possible_distal_SSP_match['location'][0] :
-                        distal_SSP = possible_distal_SSP_match
-        else :
-            barcode_start = barcode_SSP_pair['barcode_start']
-            SSP_end = barcode_SSP_pair['SSP_end']
-            
-            for possible_distal_SSP_match in SSP_matches :
-                if possible_distal_SSP_match['direction'] == 'reverse' and possible_distal_SSP_match['location'][1] < barcode_SSP_pair['barcode_start'] :
-                    if distal_SSP['edit_distance'] == 'None' :
-                        distal_SSP = possible_distal_SSP_match
-                    elif distal_SSP['edit_distance'] > possible_distal_SSP_match['edit_distance'] :
-                        distal_SSP = possible_distal_SSP_match
-                    elif distal_SSP['location'][0] > possible_distal_SSP_match['location'][0] :
-                        distal_SSP = possible_distal_SSP_match
-                        
-        parsed = {
-            'barcode_ID' : str(barcode_SSP_pair['barcode_ID']),
-            'barcode_SSP_pair_start' : str(barcode_start),
-            'barcode_SSP_pair_end' :str( SSP_end),
-            'barcode_SSP_pair_score' : str(barcode_SSP_pair['combined_score']),
-            'SSP_start' : str(distal_SSP['location'][0]),
-            'SSP_end' : str(distal_SSP['location'][1]),
-            'SSP_score' : str(distal_SSP['edit_distance']),
-            'direction' : str(barcode_SSP_pair['direction'])
-        }
-    elif barcode_SSP_pair['barcode_ID'] == 'None' :
-        parsed = {
-            'barcode_ID' : 'None matched',
-            'barcode_SSP_pair_start' : 'None',
-            'barcode_SSP_pair_end' : 'None',
-            'barcode_SSP_pair_score' : 'None',
-            'SSP_start' : 'None',
-            'SSP_end' : 'None',
-            'SSP_score' : 'None',
-            'direction' : 'None'
-        }
-    elif barcode_SSP_pair['barcode_ID'] == 'Multiple' :
-        parsed = {
-            'barcode_ID' : 'Multiple',
-            'barcode_SSP_pair_start' : 'None',
-            'barcode_SSP_pair_end' : 'None',
-            'barcode_SSP_pair_score' : 'None',
-            'SSP_start' : 'None',
-            'SSP_end' : 'None',
-            'SSP_score' : 'None',
-            'direction' : 'None'
-        }
-        
+    for SSP_match in SSP_matches :
+        if SSP_match['direction'] != barcode_SSP_pair['direction'] :
+            if SSP_match['edit_score'] < distal_SSP['SSP_edit_distance'] :
+                distal_SSP['SSP_start'] = SSP_match['location'][0]
+                distal_SSP['SSP_end'] = SSP_match['location'][1]
+                distal_SSP['SSP_edit_distance'] = SSP_match['edit_distance']
+            elif SSP_match['edit_score'] == distal_SSP['SSP_edit_distance'] and SSP_match['location'][1] < distal_SSP['SSP_end'] :
+                distal_SSP['SSP_start'] = SSP_match['location'][0]
+                distal_SSP['SSP_end'] = SSP_match['location'][1]
+                distal_SSP['SSP_edit_distance'] = SSP_match['edit_distance']
+    
+    
+    parsed = barcode_SSP_pair
+    parsed.update(distal_SSP)
+    if parsed['barcode_UMI_start'] - parsed['SSP_end'] > seq_len * 0.5 :
+        parsed['biological_seq_indices'] = [ parsed['SSP_end'], parsed['barcode_UMI_start'] ]
+    else :
+        parsed['biological_seq_indices'] = [ 0, seq_len - 1 ]
     return parsed
 
 def debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0) :
@@ -224,13 +191,18 @@ def debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_
     duplex_tags = table.column('dx:i')
     parsed_seqs = {
         'barcode_ID' : [],
-        'barcode_SSP_pair_start' : [],
-        'barcode_SSP_pair_end' : [],
-        'barcode_SSP_pair_score' : [],
+        'barcode_UMI_start' : [],
+        'barcode_UMI_end' : [],
+        'barcode_UMI_edit_distance' : [],
+        'barcode_SSP_start' : [],
+        'barcode_SSP_end' : [],
+        'barcode_SSP_edit_distance' : [],
+        'combined_score' : [],
+        'direction' : [],
         'SSP_start' : [],
         'SSP_end' : [],
-        'SSP_score' : [],
-        'direction' : []
+        'SSP_edit_distance' : [],
+        'biological_seq_indices' : []
     }
     for i in range(len(seqs)) :
         parsed_seq = parse_SSP_and_barcode(str(seqs[i]), barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP)
@@ -252,6 +224,6 @@ def debarcode(dataset_dir, barcode_path, SSP, max_barcode_score, max_SSP_score, 
     barcodes = load_barcodes(barcode_path)
     files = [x for x in Path(dataset_dir).iterdir() if x.is_file()]
     for file in files :
-        table = pq.read_table(file)
+        table = pq.read_table(file).slice(0,1000)
         table = debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP)
     return table
