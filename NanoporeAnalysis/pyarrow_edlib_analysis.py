@@ -212,6 +212,29 @@ def debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_
         table = table.append_column(key, [parsed_seqs[key]])
     return table
 
+def debarcode_table_from_file(file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0) :
+    table = pq.read_table(file)
+    if 'barcode_ID' in table.column_names :
+        table = table.drop_columns([
+            'barcode_ID',
+            'barcode_UMI_start',
+            'barcode_UMI_end',
+            'barcode_UMI_edit_distance',
+            'barcode_SSP_start',
+            'barcode_SSP_end',
+            'barcode_SSP_edit_distance',
+            'combined_score',
+            'direction',
+            'SSP_start',
+            'SSP_end',
+            'SSP_edit_distance',
+            'biological_seq_indices'
+        ])
+    table = debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP)
+    pq.write_table(table, file)
+    print(file)
+    return
+
 def load_barcodes(path) :
     barcodes = []
     with open(path, 'r') as handle :
@@ -220,10 +243,11 @@ def load_barcodes(path) :
             barcodes.append([line_split[0], utils.reverse_complement(line_split[2])])
     return barcodes
 
-def debarcode(dataset_dir, barcode_path, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0) :
+def debarcode(dataset_dir, barcode_path, SSP, max_barcode_score, max_SSP_score, max_gap=5, min_length_barcode=0, min_length_SSP=0, workers=4) :
     barcodes = load_barcodes(barcode_path)
     files = [x for x in Path(dataset_dir).iterdir() if x.is_file()]
     for file in files :
-        table = pq.read_table(file).slice(0,1000)
-        table = debarcode_table(table, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP)
-    return table
+        executor = concurrent.futures.ProcessPoolExecutor( max_workers=workers )
+        futures = [ executor.submit( debarcode_table_from_file, file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP) for file in files]
+        concurrent.futures.wait( futures )
+    return
