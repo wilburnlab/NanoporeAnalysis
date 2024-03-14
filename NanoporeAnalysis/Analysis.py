@@ -323,11 +323,11 @@ def debarcode(path_barcodes, strand_switch_primer, path_out, path_fastq=None, ov
 def minimap2(path_minimap2, path_ref, path_out, workers = 3, overwrite=False, finish=False) :
     """
     Calls Minimap2 to map all reads in given path based on a given reference. Saves mapped reads into new folder.
-
+    
     Args:
         path_minimap2 (str) = path to minimap2 executable
         path_ref (str) = path to reference file
-
+        
     Output: None
     """
     Path(path_out + '/combined_sam').mkdir(parents=True, exist_ok=True)
@@ -339,7 +339,7 @@ def minimap2(path_minimap2, path_ref, path_out, workers = 3, overwrite=False, fi
         shutil.rmtree(path_out + '/combined_bam')
         Path(path_out + '/combined_sam').mkdir(parents=True, exist_ok=True)
         Path(path_out + '/combined_bam').mkdir(parents=True, exist_ok=True)
-
+    
     #Minimap2 alignment
     if finish == True :
         files_ran = [x.stem for x in Path(path_out + '/combined_bam').iterdir() if x.is_file() and x.suffix == '.bam' ]
@@ -357,7 +357,7 @@ def minimap2(path_minimap2, path_ref, path_out, workers = 3, overwrite=False, fi
 #         subprocess.run(args, shell=True)
 #         pysam.sort("-o", str(path_out + '/combined_bam' + '/' + Path(file).stem + '.bam'), path_out + '/combined_sam' + '/' + Path(file).stem + '.sam')
 #         pysam.index(str(path_out + '/combined_bam' + '/' + Path(file).stem + '.bam'))
-
+    
     print("Done mapping")
     
     return
@@ -412,7 +412,6 @@ def count_reads(path_ref_file, samples, path_out, workers = 4, count = True, ove
             for index in counts_by_sample.index :
                 if barcode == index :
                     counts_by_sample.at[index, 'sample'] = sample
-#     print(counts_by_sample)
     counts_by_sample.reset_index().set_index(['sample', 'barcode']).to_csv(str(path_out + '/counts_by_sample.csv'), header=True, index_label=['sample', 'barcode'])
 
     print('done')
@@ -462,7 +461,7 @@ def count_util(file, path_out, path_ref_file, overwrite) :
         
         
         RPM_multiplier =  total_reads# / 1000000
-        read_count = read_count / RPM_multiplier
+        read_count = read_count #/ RPM_multiplier
         counts[contig[1]] += read_count
 #         counts_by_feature.append([contig[0], read_count])
         
