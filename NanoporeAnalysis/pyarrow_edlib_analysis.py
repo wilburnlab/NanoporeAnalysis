@@ -313,3 +313,112 @@ def debarcode(dataset_dir, barcode_path, SSP, max_barcode_score, max_SSP_score, 
             futures = [ executor.submit( debarcode_table_from_file, file, barcodes, SSP, max_barcode_score, max_SSP_score, max_gap, min_length_barcode, min_length_SSP, resume, overwrite ) for file in chunk]
             concurrent.futures.wait( futures )
     return
+
+def minimap2_table(table, path_ref, preset='splice') :
+    seqs = table.column('seq').to_pylist()
+    biological_seq_indices = table.column('biological_seq_indices').to_pylist()
+    combined_scores = table.column('combined_score').to_pylist()
+    SSP_edit_distances = table.column('SSP_edit_distance').to_pylist()
+    barcode_IDs = table.column('barcode_ID').to_pylist()
+    aligner = mappy.Aligner(path_ref, preset=preset)
+    alignments_core = {
+        'minimap2_q_st' : [],
+        'minimap2_q_en' : [],
+        'minimap2_strand' : [],
+        'minimap2_ctg' : [],
+        'minimap2_ctg_len' : [],
+        'minimap2_r_st' : [],
+        'minimap2_r_en' : [],
+        'minimap2_mlen' : [],
+        'minimap2_blen' : [],
+        'minimap2_mapq' : []
+    }
+    alignments_tags = {}
+    alignments_core_keys = alignments_core.keys()
+    alignments_tags_keys = alignments_tags.keys()
+    i=0
+    for i in range(len(seqs)) :
+        hit_core_dict = dict.fromkeys(alignments_core_keys)
+        hit_tags_dict = dict.fromkeys(alignments_tags_keys)
+        if combined_scores[i] <= 20 and barcode_IDs[i] != 'Multiple' and SSP_edit_distances[i] <= 5 :
+            indices = biological_seq_indices[i]
+            for hit in aligner.map(seqs[i][indices[0] : indices[1]]) :
+                if hit.is_primary :
+                    hit_split = str(hit).split('\t')
+                    j = 0
+                    for key in alignments_core_keys :
+                        hit_core_dict[key] = hit_split[j] 
+                        j += 1
+                    for tag in hit_split[j:] :
+                        tag_name = 'minimap2_' + tag[:4]
+                        tag_content = tag[5:]
+                        hit_tags_dict[tag_name] = tag_content
+        
+        for key in alignments_core_keys :
+            alignments_core[key].append(hit_core_dict[key])
+        for key in hit_tags_dict.keys() :
+            if key not in alignments_tags_keys :
+                alignments_tags[key] = pa.nulls(len(alignments_core['minimap2_q_st']) - 1).to_pylist()
+            alignments_tags[key].append(hit_tags_dict[key])
+    for key in alignments_core :
+        table = table.append_column(key, [alignments_core[key]])
+    for key in alignments_tags :
+        table = table.append_column(key, [alignments_tags[key]])
+    del aligner
+    return table
+
+def minimap2_table_from_file(file, path_ref, preset='splice', resume=False, overwrite=False) :
+    table = pq.read_table(file)
+    if 'minimap2_q_st' in table.column_names :
+        if resume == True :
+            print('skip resume', file)
+            del table
+            return
+        elif overwrite == True :
+            columns_to_drop = [ name for name in table.column_names if 'minimap2' in name ]
+            table = table.drop_columns(columns_to_drop)
+        else :
+            print('skip no overwrite', file)
+            del table
+            return
+    table = minimap2_table(table, path_ref, preset=preset)
+    pq.write_table(table, file)
+    del table
+    print(file)
+    return
+
+def minimap2(dataset_dir, path_ref, preset='splice', resume=False, overwrite=False, workers = 4) :
+    files = [x for x in Path(dataset_dir).iterdir() if x.is_file()]
+    split = math.ceil( len(files) / workers )
+    files_chunks = np.array_split(np.array(files), split)
+    for chunk in files_chunks :
+        with concurrent.futures.ProcessPoolExecutor( max_workers=workers ) as executor :
+            futures = [ executor.submit( minimap2_table_from_file, file, path_ref, preset=preset, resume=resume, overwrite=overwrite ) for file in chunk]
+            concurrent.futures.wait( futures )
+
+def qc_metrics(path_dataset) :
+    table = pq.read_table(path_dataset, columns = ['seq_len', 'combined_score', 'barcode_ID', 'SSP_edit_distance'])
+    qc = {}
+    hist_max = 5000
+    fig1, qc['alignment_scores_hist'] = plt.subplots(2,2, sharex=True, sharey=True)
+
+    group_1 = table.filter(pc.field("combined_score") <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') <= 5)
+    qc['alignment_scores_hist'][0,0].hist(group_1.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
+    qc['alignment_scores_hist'][0,0].set_title('Passed Barcode and Strand Switch', {'fontsize': 10})
+    group_2 = table.filter(pc.field("combined_score") <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') > 5)
+    qc['alignment_scores_hist'][0,1].hist(group_2.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
+    qc['alignment_scores_hist'][0,1].set_title('Passed Barcode, failed Strand Switch', {'fontsize': 10})
+    group_3 = table.filter(pc.field("combined_score") > 20).filter(pc.field('SSP_edit_distance') <= 5)
+    qc['alignment_scores_hist'][1,0].hist(group_3.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
+    qc['alignment_scores_hist'][1,0].set_title('Failed Barcode, passed Strand Switch', {'fontsize': 10})
+    group_4 = table.filter(pc.field("combined_score") > 20).filter(pc.field('SSP_edit_distance') > 5)
+    qc['alignment_scores_hist'][1,1].hist(group_4.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
+    qc['alignment_scores_hist'][1,1].set_title('Failed Barcode and Strand Switch', {'fontsize': 10})
+
+    barcodes = table.column('barcode_ID').unique().to_pylist()
+    for barcode in barcodes :
+        print(barcode + ' passed barcode and SSP: ' + str(group_1.filter(pc.field('barcode_ID') == barcode).num_rows))
+        print(barcode + ' passed barcode, failed SSP: ' + str(group_2.filter(pc.field('barcode_ID') == barcode).num_rows))
+        print(barcode + ' failed barcode, passed SSP: ' + str(group_3.filter(pc.field('barcode_ID') == barcode).num_rows))
+        print(barcode + ' failed barcode and SSP: ' + str(group_4.filter(pc.field('barcode_ID') == barcode).num_rows))
+    return qc
