@@ -138,7 +138,11 @@ def score_umi(putative_umi: str,
         #print(umi_align)
         if umi_align['editDistance'] == -1:
             umi_align['editDistance'] = len(umi)
-        umi_score = np.max([len(umi)-umi_align['editDistance'],0.5])/len(umi)
+        if len(umi_align['locations']) != 0 :
+            umi_alignment_length = np.abs(umi_align['locations'][0][0] - umi_align['locations'][0][1])
+        else :
+            umi_alignment_length = 0
+        umi_score = np.max([ umi_alignment_length - umi_align['editDistance'], 0.5 ])/len(umi)
         scores[name] = umi_score
     scores = dict(sorted(scores.items(), key=lambda x:x[1], reverse=True))
     return scores
@@ -159,7 +163,7 @@ def parse_adapter3_seq(sequence: str,
         post_start = np.min([l[0] for l in primer_locations])
     else:
         primer_score = 0.5/len(primer)
-        post_start = len(sequence) # Retain full sequence for UMI alignment
+    post_start = len(sequence) # Retain full sequence for UMI alignment
     putative_umi = sequence[:post_start]
     umi_scores = score_umi(putative_umi, umi_dict)
     return primer_score, umi_scores
@@ -208,7 +212,8 @@ def process_read(read: dict,
                  primer3: str,
                  umis: dict,
                  min_polyA_score: float = 0.5,
-                 min_ssp_score: float = 0.5):
+                 min_ssp_score: float = 0.5,
+                 min_umi_score: float = 0.5):
     '''
     Annotate reads and, if possible, re-orient along forward strand
     
@@ -224,10 +229,10 @@ def process_read(read: dict,
     rc_read['sequence'] = rc(rc_read['sequence'])
     reverse_analysis = annotate_read(rc_read, ssp, primer3, umis)
     
-    if np.max([forward_analysis['PolyA score'],reverse_analysis['PolyA score']]) > min_polyA_score:
+    if np.max([list(forward_analysis['UMI Scores'].values())[0],list(reverse_analysis['UMI Scores'].values())[0]]) > min_umi_score:
         # Found a PolyA tail
         delta_polyA_score = forward_analysis['PolyA score'] - reverse_analysis['PolyA score']
-        if np.abs(delta_polyA_score) > min_polyA_score:
+        if max([forward_analysis['PolyA score'], reverse_analysis['PolyA score']]) > min_polyA_score:
             analysis = forward_analysis if delta_polyA_score > 0 else reverse_analysis
             annotation = 'Full-length cDNA' if analysis['SSP alignment score'] > min_ssp_score else "3\' only"
         else:
@@ -252,7 +257,6 @@ def process_read(read: dict,
         else:
             analysis = forward_analysis # Unknown, no better guess
             annotation = "Uncharacterized sequence"
-            
     analysis['annotation'] = annotation 
     analysis['Best UMI'] = best_umi
     analysis['Best UMI Score'] = best_umi_score
