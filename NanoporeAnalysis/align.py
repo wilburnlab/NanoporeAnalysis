@@ -239,7 +239,7 @@ def process_read(read: dict,
         
     else:
         # Did not find a PolyA tail, check for 5' features
-        best_umi, best_umi_score, delta_umi_score = [None]*3
+        best_umi, best_umi_score, delta_umi_score =  None, 0.0, 0.0
         max_ssp_score = np.max([forward_analysis['SSP alignment score'],reverse_analysis['SSP alignment score']])
         if max_ssp_score > min_ssp_score:
             delta_ssp_score = forward_analysis['SSP alignment score']-reverse_analysis['SSP alignment score']
@@ -252,11 +252,13 @@ def process_read(read: dict,
         else:
             analysis = forward_analysis # Unknown, no better guess
             annotation = "Uncharacterized sequence"
-            
-    analysis['annotation'] = annotation 
+
     analysis['Best UMI'] = best_umi
     analysis['Best UMI Score'] = best_umi_score
-    analysis['Delta UMI Score'] = delta_umi_score
+    analysis['Delta UMI Score'] = delta_umi_score  
+    if delta_umi_score < 0.3:
+        annotation += ' without UMI'  
+    analysis['annotation'] = annotation 
     return analysis, forward_analysis, reverse_analysis
 
 
