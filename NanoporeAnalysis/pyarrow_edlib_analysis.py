@@ -8,30 +8,134 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from pyarrow import dataset
+from pyarrow import csv
 import matplotlib.pyplot as plt
+import mappy
 import numpy as np
 from NanoporeAnalysis import utils
 from NanoporeAnalysis import local_io
 import edlib
 
-def pod5_split() :
-    
-    #generate the index of all reads and their channels
+def pod5_split(path_out, path_pod5, account, mail, reset_pod5_view = False, workers=1) :
+    Path(path_out).mkdir(parents=True, exist_ok=True)
     if not os.path.isfile(Path(path_out + "/view.txt")) or reset_pod5_view == True :
-        pod5_view.view_pod5([Path(path_data)], Path(path_out), include = "read_id, channel", force_overwrite=True, threads=threads)
-    else :
-        view = pd.read_table(Path(path_out + "/view.txt"), sep='\t')
-    
-    channels = view['channel'].unique()
-    channels_per_worker = np.array_split(np.array(channels), workers)
-    
+        pod5_view.view_pod5([Path(path_pod5)], Path(path_out + '/view.txt'), include = "read_id, channel", force_overwrite=True, threads=workers)
+    view = csv.read_csv(path_out + "/view.txt", parse_options=csv.ParseOptions(delimiter='\t'))
+    channels = view.column('channel').unique().to_pylist()
+    if Path(path_out + '/split_pod5/').is_dir() :
+        shutil.rmtree(Path(path_out + '/split_pod5/'))
+    if Path(path_out + '/logs_split_pod5/').is_dir() :
+        shutil.rmtree(Path(path_out + '/logs_split_pod5/'))
+    Path(path_out + '/split_pod5/').mkdir(parents=True, exist_ok=True)
+    Path(path_out + '/logs_split_pod5/').mkdir(parents=True, exist_ok=True)
+    for channel in channels :
+        Path(path_out + '/split_pod5/' + str(channel)).mkdir(parents=True, exist_ok=True)
+    files = [str(x) for x in Path(path_pod5).iterdir()]
+    file_chunks = np.array_split(files, workers )
+    print("done with prep work")
     for i in range(workers) :
-        
-        view.query("channel in " + str(channels_per_worker[i]))['read_id'].to_csv(Path(path_out + "/view_current.txt"), index = False, sep=' ', header=False)
-        pod5_filter.filter_pod5([Path(path_data)], Path(path_out + '/split_pod5s_' + str(i)), threads = threads, force_overwrite = True, ids = Path(path_out + "/view_current.txt"))
+        script = [
+            "#!/bin/bash\n",
+            "#SBATCH --account=" + account + "\n",
+            "#SBATCH --job-name=pod5_split_" + str(i) + "\n",
+            "#SBATCH --nodes=1 --ntasks-per-node=1\n",
+            "#SBATCH --cpus-per-task=4\n",
+            "#SBATCH --output=" + path_out + "/logs_split_pod5/" + str(i) + ".out" + "\n",
+            "#SBATCH --mail-type=None\n",
+            "#SBATCH --time=04:00:00\n",
+            "#SBATCH --mail-user=" + mail + "\n",
+            "module load miniconda3/23.3.1-py310\n",
+            "conda activate JSont\n",
+            "pod5 subset " + ' '.join(file_chunks[i]) + " --table " + path_out + "/view.txt -o " + path_out + "/split_pod5/ --threads 4 --template '{channel}/{channel}_" + str(i) + ".pod5' -M --columns channel"
+        ]
+        with open(str(path_out + "/logs_split_pod5/" + str(i) + ".sh"), 'w') as handle:
+            handle.writelines(script)
+        args = ["sbatch", str(path_out + "/logs_split_pod5/" + str(i) + ".sh")]
+        subprocess.run(args)
     return
 
-def sam_to_parquet(file, path_dataset, basename_template = None, sam_or_bam = 'sam') :
+def copy_split_pod5s(path_out, workers = 10) :
+    if Path(path_out + '/grouped_pod5/').is_dir() :
+        shutil.rmtree(Path(path_out + '/grouped_pod5/'))
+    Path(path_out + "/grouped_pod5/").mkdir(parents=True, exist_ok=True)
+    channel_folders = [x for x in Path(path_out + "/split_pod5/").iterdir()]
+    channel_folder_chunks = np.array_split( channel_folders, workers )
+    for i in range(len(channel_folder_chunks)) :
+        print("started moving group ", i)
+        Path( path_out + "/grouped_pod5/" + str(i) ).mkdir(parents=True, exist_ok=True)
+        with concurrent.futures.ProcessPoolExecutor( max_workers = workers ) as executor :
+            futures = [ executor.submit( shutil.copytree, folder, Path( path_out + "/grouped_pod5/" + str(i) + "/" + folder.stem ) ) for folder in channel_folder_chunks[i] ]
+            concurrent.futures.wait( futures )
+        print("finished moving group ", i)
+    return
+
+def check_pod5_jobs() :
+    args = ['squeue', '-u', 'smith12380', '-v', '-r', '--states=BF,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RS,RV,ST,S,TO', '--format="%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R"']
+    squeue = subprocess.run(args, capture_output=True)
+    stdout = str(squeue.stdout)
+    squeue_nl_split = stdout.split('\\n')
+    for item in squeue_nl_split :
+        if 'pod5' in item :
+            return True
+    return False
+
+def run_dorado_job(path_out, path_dorado, account, mail, i) :
+    script = [
+        "#!/bin/bash\n",
+        "#SBATCH --account=" + account + "\n",
+        "#SBATCH --job-name=dorado_" + str(i) + "\n",
+        "#SBATCH --nodes=1\n",
+        "#SBATCH --ntasks=1\n",
+        "#SBATCH --cpus-per-task=12\n",
+        "#SBATCH --mem=80G\n",
+        "#SBATCH --gres=gpu:1\n",
+        "#SBATCH --time=12:00:00\n",
+        "#SBATCH --output=" + path_out + "/logs_dorado/dorado_" + str(i) + ".out" + "\n",
+        "#SBATCH --mail-type=None\n",
+        "#SBATCH --mail-user=" + mail + "\n",
+        str(path_dorado) + " duplex sup --emit-sam -r -v " + str(path_out) + "/grouped_pod5/" + str(i) + "/ > " + str(path_out) + "/basecalled/" + str(i) + ".sam"
+    ]
+    with open(path_out + '/logs_dorado/dorado_' + str(i) + '.sh', 'w') as handle:
+        handle.writelines(script)
+    args = ['sbatch', str(path_out + '/logs_dorado/dorado_' + str(i) + '.sh')]
+    subprocess.run(args)
+    return
+
+def dorado_slurm(path_out, path_dorado, account, mail, workers = 10, skip_split = False) :
+    while check_pod5_jobs() :
+        print("pod5 spit still running")
+        time.sleep(180)
+    if Path(path_out + '/basecalled/').is_dir() :
+        shutil.rmtree(Path(path_out + '/basecalled/'))
+    Path(path_out + "/basecalled/").mkdir(parents=True, exist_ok=True)
+    if Path(path_out + '/logs_dorado/').is_dir() :
+        shutil.rmtree(Path(path_out + '/logs_dorado/'))
+    Path(path_out + "/logs_dorado/").mkdir(parents=True, exist_ok=True)
+    if not skip_split :
+        copy_split_pod5s(path_out, workers)
+    for i in range(workers) :
+        run_dorado_job(path_out, path_dorado, account, mail, i)
+    return
+
+def check_dorado_jobs(path_out, path_dorado, account, mail) :
+    dorado_logs = [ x for x in Path(path_out + "/logs_dorado/").iterdir() if x.suffix == '.out' ]
+    broken_jobs = []
+    for dorado_log in dorado_logs :
+        broken = True
+        with open(dorado_log, 'r') as handle :
+            for line in handle.readlines() :
+                if 'Basecalled' in line :
+                    broken = False
+                    break
+        if broken == True :
+            name = dorado_log.stem
+            i = name.split('_')[1]
+            broken_jobs.append(i)
+    for broken_job in broken_jobs :
+        run_dorado_job(path_out, path_dorado, account, mail, broken_job)
+    return
+
+def sam_to_parquet(file, path_out, basename_template = None, sam_or_bam = 'sam') :
     table_dict = {
         'ID' : [],
         'seq' : [],
@@ -66,10 +170,11 @@ def sam_to_parquet(file, path_dataset, basename_template = None, sam_or_bam = 's
     dataset.write_dataset(table, Path(path_out + '/pa_dataset'), format='parquet', basename_template = basename_template, max_rows_per_file = 200000, max_rows_per_group = 200000, existing_data_behavior='overwrite_or_ignore')
     return 'done'
 
-def build_parquet_dataset_from_sam(sam_folder, path_dataset) :
+def build_parquet_dataset_from_sam(sam_folder, path_out) :
     files = [x for x in Path(sam_folder).iterdir() if x.is_file()]
     for file in files :
-        sam_to_parquet(file, path_dataset, basename_template = str(file.stem + '_part-{i}.parquet'))
+        print("moving file ", file.stem)
+        sam_to_parquet(file, path_out, basename_template = str(file.stem + '_part-{i}.parquet'))
     return 'done'
 
 def find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_length = 0, skip_reverse = False) :
@@ -368,11 +473,12 @@ def debarcode_table_from_file(file, UMIs, SSP, UMI_max_score, SSP_max_score, max
     table = pq.read_table(file)
     if 'barcode_ID' in table.column_names :
         if resume == True :
-            print('skip resume', file)
+            print("skip resume", file)
             print(table.column_names)
             del table
             return
         elif overwrite == True :
+            print("removing old barcoding data...")
             for column_name in [
                 'barcode_ID',
                 'barcode_polyA_start',
@@ -395,13 +501,13 @@ def debarcode_table_from_file(file, UMIs, SSP, UMI_max_score, SSP_max_score, max
                 if column_name in table.column_names :
                     table = table.drop_columns([column_name])
         else :
-            print('skip no overwrite', file)
+            print("skip no overwrite", file)
             del table
             return
+    print("debarcoding file ", file.stem)
     table = debarcode_table(table, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap, UMI_min_len, SSP_min_len, polyA_N, polyA_tolerated_mismatches, polyA_min_len)
     pq.write_table(table, file)
     del table
-    print(file)
     return
 
 def load_barcodes(path) :
@@ -426,7 +532,7 @@ def debarcode(dataset_dir, UMIs_path, SSP, UMI_max_score, SSP_max_score, max_gap
 def minimap2_table(table, path_ref, preset='splice') :
     seqs = table.column('seq').to_pylist()
     biological_seq_indices = table.column('biological_seq_indices').to_pylist()
-    combined_scores = table.column('combined_score').to_pylist()
+    barcode_scores = table.column('barcode_score').to_pylist()
     SSP_edit_distances = table.column('SSP_edit_distance').to_pylist()
     barcode_IDs = table.column('barcode_ID').to_pylist()
     aligner = mappy.Aligner(path_ref, preset=preset)
@@ -449,7 +555,7 @@ def minimap2_table(table, path_ref, preset='splice') :
     for i in range(len(seqs)) :
         hit_core_dict = dict.fromkeys(alignments_core_keys)
         hit_tags_dict = dict.fromkeys(alignments_tags_keys)
-        if combined_scores[i] <= 20 and barcode_IDs[i] != 'Multiple' and SSP_edit_distances[i] <= 5 :
+        if barcode_scores[i] <= 20 and barcode_IDs[i] != 'Multiple' and SSP_edit_distances[i] <= 5 :
             indices = biological_seq_indices[i]
             for hit in aligner.map(seqs[i][indices[0] : indices[1]]) :
                 if hit.is_primary :
@@ -477,6 +583,7 @@ def minimap2_table(table, path_ref, preset='splice') :
     return table
 
 def minimap2_table_from_file(file, path_ref, preset='splice', resume=False, overwrite=False) :
+    print(file, '                  ')
     table = pq.read_table(file)
     if 'minimap2_q_st' in table.column_names :
         if resume == True :
@@ -506,18 +613,20 @@ def minimap2(dataset_dir, path_ref, preset='splice', resume=False, overwrite=Fal
             concurrent.futures.wait( futures )
     return
 
-def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict) :
+def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict, run_label = "None") :
     ref = local_io.read_fastx(path_ref)
-    contigs_to_gene_name = {}
-    gene_names = []
-    
+    contigs_to_gene_IDs = {}
+    gene_IDs = []
+    #NM_000014.6 Homo sapiens alpha-2-macroglobulin (A2M), transcript variant 1, mRNA
     for key in ref.keys() :
         comma_split = key.split(', ')
-        contig_name_split = comma_split[0].split(' ')
-        contig_id = contig_name_split[0]
-        gene_name = ' '.join(contig_name_split[1:])
-        contigs_to_gene_name[contig_id] = gene_name
-        gene_names.append(gene_name)
+        space_split = comma_split[0].split(' ')
+        left_para_split = key.split('(')
+        right_para_split = left_para_split[ len(left_para_split) - 1 ].split(')')
+        gene_ID = right_para_split[0]
+        contig_ID = space_split[0]
+        contigs_to_gene_IDs[contig_ID] = gene_ID
+        gene_IDs.append(gene_ID)
     
     table = pq.read_table(dataset_dir, columns=['barcode_ID', 'minimap2_ctg', 'minimap2_mapq'])
     barcodes = table.column('barcode_ID').unique().to_pylist()
@@ -525,16 +634,16 @@ def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict) :
     for barcode in barcodes :
         if barcode not in ['None matched', 'Multiple'] :
             counts_in_barcode_array = table.filter( pc.field('barcode_ID') == barcode ).column('minimap2_ctg').drop_null().value_counts()
-            counts_in_barcode_dict = dict.fromkeys(gene_names, 0)
-            total_counts = 0
+            counts_in_barcode_dict = dict.fromkeys(gene_IDs, 0)
+#             total_counts = 0
             for count in counts_in_barcode_array :
-                gene_name = contigs_to_gene_name[str(count[0])]
-                counts_in_barcode_dict[gene_name] += count[1].as_py()
-                total_counts += count[1].as_py()
+                gene_ID = contigs_to_gene_IDs[str(count[0])]
+                counts_in_barcode_dict[gene_ID] += count[1].as_py()
+#                 total_counts += count[1].as_py()
             for key in counts_in_barcode_dict :
-                counts_in_barcode_dict[key] = [ counts_in_barcode_dict[key] ]#/ total_counts ]
+                counts_in_barcode_dict[key] = [ counts_in_barcode_dict[key] ]
             
-            counts_in_barcode_table = pa.table(counts_in_barcode_dict).add_column(0, 'barcode_ID', [[barcode]]).add_column(0, 'sample', [[sample_dict[barcode]]])
+            counts_in_barcode_table = pa.table(counts_in_barcode_dict).add_column(0, 'barcode_ID', [[barcode]]).add_column(0, 'sample', [[sample_dict[barcode]]]).add_column(0, 'run_label', [[run_label]])
             if not counts :
                 counts = counts_in_barcode_table
             else :
@@ -545,21 +654,21 @@ def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict) :
     return
 
 def qc_metrics(path_dataset) :
-    table = pq.read_table(path_dataset, columns = ['seq_len', 'combined_score', 'barcode_ID', 'SSP_edit_distance'])
+    table = pq.read_table(path_dataset, columns = ['seq_len', 'barcode_score', 'barcode_ID', 'SSP_edit_distance'])
     qc = {}
     hist_max = 5000
     fig1, qc['alignment_scores_hist'] = plt.subplots(2,2, sharex=True, sharey=True)
 
-    group_1 = table.filter(pc.field("combined_score") <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') <= 5)
+    group_1 = table.filter(pc.field('barcode_score') <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') <= 5)
     qc['alignment_scores_hist'][0,0].hist(group_1.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
     qc['alignment_scores_hist'][0,0].set_title('Passed Barcode and Strand Switch', {'fontsize': 10})
-    group_2 = table.filter(pc.field("combined_score") <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') > 5)
+    group_2 = table.filter(pc.field('barcode_score') <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') > 5)
     qc['alignment_scores_hist'][0,1].hist(group_2.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
     qc['alignment_scores_hist'][0,1].set_title('Passed Barcode, failed Strand Switch', {'fontsize': 10})
-    group_3 = table.filter(pc.field("combined_score") > 20).filter(pc.field('SSP_edit_distance') <= 5)
+    group_3 = table.filter(pc.field('barcode_score') > 20).filter(pc.field('SSP_edit_distance') <= 5)
     qc['alignment_scores_hist'][1,0].hist(group_3.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
     qc['alignment_scores_hist'][1,0].set_title('Failed Barcode, passed Strand Switch', {'fontsize': 10})
-    group_4 = table.filter(pc.field("combined_score") > 20).filter(pc.field('SSP_edit_distance') > 5)
+    group_4 = table.filter(pc.field('barcode_score') > 20).filter(pc.field('SSP_edit_distance') > 5)
     qc['alignment_scores_hist'][1,1].hist(group_4.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
     qc['alignment_scores_hist'][1,1].set_title('Failed Barcode and Strand Switch', {'fontsize': 10})
 

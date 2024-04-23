@@ -79,7 +79,7 @@ def run_dorado_slurm(path_dorado, path_model, path_out, path_data, account, mail
     if skip_split == False :
         if os.listdir(path_out + '/pod5s_by_channel') and overwrite == False :
             raise FileExistsError("Error: output path (split_pod5s) may contain data. Please point to a fresh directory or specify overwrite=True")
-        elif overwrite == True :
+        elif os.listdir(path_out + '/pod5s_by_channel') and overwrite == True :
             shutil.rmtree(path_out + '/pod5s_by_channel')
             Path(path_out + '/pod5s_by_channel').mkdir(parents=True, exist_ok=True)
         print("started making the table")
@@ -87,11 +87,11 @@ def run_dorado_slurm(path_dorado, path_model, path_out, path_data, account, mail
         print("finished making the table")
         
         pod5_view = pd.read_table(Path(path_out + "/view.txt"), sep='\t')
-#         for channel in pod5_view['channel'].unique() :
-#             pod5_view[pod5_view['channel'] == channel]['read_id'].to_csv(Path(path_out + "/view_current.txt"), index = False, sep=' ', header=False)
-#             pod5_filter.filter_pod5([Path(path_data)], Path(path_out + '/split_pod5s'), threads = threads, force_overwrite = True, ids = Path(path_out + "/view.txt"))
+        for channel in pod5_view['channel'].unique() :
+            pod5_view[pod5_view['channel'] == channel]['read_id'].to_csv(Path(path_out + "/view_current.txt"), index = False, sep=' ', header=False)
+            pod5_filter.filter_pod5([Path(path_data)], Path(path_out + '/split_pod5s'), threads = threads, force_overwrite = True, ids = Path(path_out + "/view_current.txt"))
         
-#         pod5_subset.subset_pod5([Path(path_data)], Path(path_out + '/split_pod5s'), threads = threads, force_overwrite = True, columns = ["channel"], table = Path(path_out + "/view.txt"))
+        pod5_subset.subset_pod5([Path(path_data)], Path(path_out + '/split_pod5s'), threads = threads, force_overwrite = True, columns = ["channel"], table = Path(path_out + "/view.txt"))
         print("finished subsetting")
         
         channel_folders = [x for x in Path(path_out + '/pod5s_by_channel').iterdir() if x.is_dir()]
