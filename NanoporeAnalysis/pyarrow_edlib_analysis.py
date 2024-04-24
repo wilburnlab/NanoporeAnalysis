@@ -839,7 +839,7 @@ def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict, run_lab
     Args :
         dataset_dir (str) : the path to the folder containing the parquet files to be counted. Should be path_out/pa_dataset/ where path_out is the same as what was used in build_parquet_dataset_from_sam.
         path_ref (str) : path to the sequence reference to be used. Currently intended to work with a transcripomic reference, essentially in the format of a fastq file where each row is a transcript with a contig ID, then sequence, then some tags. The critical information is the gene ID in parentheses, which must be the last parentheses in the first field of each row. ie XC001.4 Gene Name Etc. (version 1) (Gene ID), sequence, other information.
-        path_out_csv (str) : the full path to where the results should be saved as csv.
+        path_out_csv (str) : the full path to where the results should be saved as csv. Will have a column per gene plus columns for barcode_ID, gene, and run_label. Each row denotes a different barcode/sample/run.
         sample_dict (dict) : a dictionary to define which barcodes belong to what sample names. Must be in the form of 'barcode ID' : 'sample name'.
         run_label (str) : a label that is assigned to all the reads in this dataset to potentially differentiate them from reads from other runs that might share the same barcode and sample names. Useful for combining reads from two runs with the same samples or if a run fails and is restarted.
     """
@@ -880,6 +880,107 @@ def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict, run_lab
     csv.write_csv(counts, path_out_csv)
     print('done')
     return
+
+def generate_priors(path_csv, samples, value_to_check, func_to_check = None, field_to_sort_by = None, N = None) :
+    """
+    Uses compare_counts() to generate a list of genes to use as priors for another compare_counts(), meant to make the FDR more useful. This is able to be customized to restrict based on any field in the table output by compare_counts().
+    
+    Args :
+        path_csv (str) : path to the counts csv output by count_reads(). Must have a column per gene plus columns for barcode_ID, gene, and run_label. Each row denotes a different barcode/sample/run.
+        samples (list) : a list of 2 strings ['sample1', 'sample2'] denoting the samples to be compared. The fold changes will be defined as the first sample divided by the second.
+        value_to_check (str) : the field in the compare_counts() table to be used to select genes.
+        func_to_check (function) : a function that accepts the value in the table under value_to_check and outputs a boolean. ie lambda x : if x >= 2. Defaults to None, in which case the function will include all N genes (see below for details on N).
+        field_to_sort_by (str) : the field in the compare_counts() table to be used to sort the reads prior to selection. Only useful if using the N argument to select the first N genes. Defaults to None, in which case the order in the counts csv is preserved, which is sorted by ascending pvalue when originally created by count_mapped_reads().
+        N (int) : the number of genes to select. These will be selected from the gene list after sorting by field_to_sort_by. ie if N = 100 and field_to_sort_by = 'padj', this will output the 100 genes with the lowest padj. Defaults to None, in which case all genes will be evaluated, if func_to_check is set.
+       
+    Returns :
+        priors (list) : list of gene IDs to be used as priors for compare_counts().
+    """
+    comparison_table = compare_counts(path_csv, samples, make_plot = False)
+    if N == None :
+        N = comparison_table.num_rows
+    if field_to_sort_by != None :
+        comparison_table = comparison_table.sort_by(field_to_sort_by)
+    values = comparison_table.column( value_to_check ).to_pylist()
+    genes = comparison_table.column( 'gene' ).to_pylist()
+    priors = []
+    for i in range(N) :
+        if func_to_check != None :
+            if func_to_check(values[i]) :
+                priors.append(genes[i])
+        else :
+            priors.append(gene[i])
+    return priors
+
+def compare_counts(path_csv, samples, priors = None, make_plot = True) :
+    """
+    Compares the gene counts in the counts csv between two samples. Converts counts to a fraction of the total number of reads, converts this to logit, uses walsch's t test with unequal variance to determine pvalue, finds the log_2 of the fold change between them, performs p adjustment, and outputs a volcano plot (if set).
+    
+    Args :
+        path_csv (str) : path to the counts csv output by count_reads(). Must have a column per gene plus columns for barcode_ID, gene, and run_label. Each row denotes a different barcode/sample/run.
+        samples (list) : a list of 2 strings ['sample1', 'sample2'] denoting the samples to be compared. The fold changes will be defined as the first sample divided by the second.
+        priors (list) : list of genes to restrict the analysis to. This can be the output from generate_priors(). Defaults to None, in which case all genes are considered.
+        make_plot (bool) : whether or not to make the volcano plot. Uses log_2_diff for the x axis and log_10_pvalue for the y axis and uses the colors column in the comparison_table to define the colors of the data points, which denote points with padj < 0.05. Defaults to True.
+        
+    Returns :
+        comparison_table (pyarrow table) : a table with each gene as a row and columns for gene, log_2_diff, pvalue, log_10_pvalue, padj, and color.
+    """
+    counts = csv.read_csv(path_csv, read_options = csv.ReadOptions(block_size = 10000000))
+    comparison_dict = {'gene' : [], 'log_2_diff' : [], 'pvalue' : [], 'log_10_pvalue' : []}
+    counts_sample_1 = counts.filter(pc.field('sample') == samples[0]).drop_columns(['barcode_ID', 'sample', 'run_label'])
+    counts_sample_2 = counts.filter(pc.field('sample') == samples[1]).drop_columns(['barcode_ID', 'sample', 'run_label'])
+    genes_to_check = counts_sample_1.column_names if priors == None else priors
+    counts_total_1 = 0
+    counts_total_2 = 0
+    for column in counts_sample_1.itercolumns() :
+        for value in column :
+            counts_total_1 += value.as_py()
+    for column in counts_sample_2.itercolumns() :
+        for value in column :
+            counts_total_2 += value.as_py()
+    for gene in genes_to_check :
+        sample_1_values = counts_sample_1.column(gene).to_pylist()
+        sample_2_values = counts_sample_2.column(gene).to_pylist()
+        if 0 not in sample_1_values and 0 not in sample_2_values and ( min(sample_1_values) >= 5 or min(sample_2_values) >= 5 )  :
+            sample_1_logit = [np.log(x / counts_total_1) - np.log(1 - (x / counts_total_1)) for x in sample_1_values]
+            sample_2_logit = [np.log(x / counts_total_2) - np.log(1 - (x / counts_total_2)) for x in sample_2_values]
+            dof = len(sample_1_logit) + len(sample_2_logit) - 2
+            t_test = stats.ttest_ind(sample_1_logit, sample_2_logit, equal_var = False)
+            unlogit_mean_sample_1 = np.exp(np.mean(sample_1_logit)) / ( 1 - np.exp(np.mean(sample_1_logit)) )
+            unlogit_mean_sample_2 = np.exp(np.mean(sample_2_logit)) / ( 1 - np.exp(np.mean(sample_2_logit)) )
+            log_2_diff = np.log2( unlogit_mean_sample_1 / unlogit_mean_sample_2 )
+            comparison_dict['gene'].append(gene)
+            comparison_dict['log_2_diff'].append(log_2_diff)
+            comparison_dict['pvalue'].append(t_test.pvalue)
+            comparison_dict['log_10_pvalue'].append(-np.log10(t_test.pvalue))
+    comparison_table = pa.table(comparison_dict).sort_by('pvalue')
+    significant = True
+    padjs = []
+    colors = []
+    p_values = comparison_table.column('pvalue').to_pylist()
+    log_2_diff = comparison_table.column('log_2_diff').to_pylist()
+    N = comparison_table.num_rows
+    for i in range(0, N) :
+        padj = (p_values[i] * N) / (i + 1) # * ( 10 ** (-1 * values['-log_10_p_value'] ) ) / rank
+        padjs.append( padj )
+        if significant == True :
+            if padj <= 0.05 :
+                if log_2_diff[i] <= -1 :
+                    colors.append('red')
+                elif log_2_diff[i] >= 1 :
+                    colors.append('blue')
+                else :
+                    colors.append('black')
+            else :
+                significant = False
+                colors.append('black')
+        else :
+            colors.append('black')
+    comparison_table = comparison_table.append_column('padj', [padjs])
+    comparison_table = comparison_table.append_column('color', [colors])
+    if make_plot :
+        plt.scatter(comparison_table.column('log_2_diff').to_pylist(), comparison_table.column('log_10_pvalue').to_pylist(), c = comparison_table.column('color').to_pylist(), s = 2)
+    return comparison_table
 
 def qc_metrics(path_dataset) :
     table = pq.read_table(path_dataset, columns = ['seq_len', 'barcode_score', 'barcode_ID', 'SSP_edit_distance'])
