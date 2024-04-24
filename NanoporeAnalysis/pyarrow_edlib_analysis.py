@@ -16,9 +16,21 @@ from NanoporeAnalysis import utils
 from NanoporeAnalysis import local_io
 import edlib
 
-def pod5_split(path_out, path_pod5, account, mail, reset_pod5_view = False, workers=1) :
+def pod5_split(path_out, path_pod5, python_env, account, mail, mail_type = 'None', workers=5) :
+    """
+    Runs slurm jobs to split .pod5 files into separate folders based on sequencing channel. This is needed for running dorado duplexing on the OSC with multiple workers. .pod5 files are split and saved under path_out/split_pod5/{channel}, and the job scripts and .out logs are saved under path_out/logs_split_pod5. Currently requires a specified python environment with the pod5 package from ONT installed.
+    
+    Args:
+        path_out (str) : directory to be used as the output folder. This will be created if it doesn't exist.
+        path_pod5 (str) : directory containing .pod5 files. The function will recursively find the files in this folder.
+        python_env (str) : name of your conda environment with pod5 installed.
+        account (str) : OSC account to be billed for the compute time.
+        mail (str) : email for any status messages from the jobs.
+        mail_type (str) : type of messages to recieve for the jobs ie 'Start', 'All', 'Error'. Defaults to 'None'
+        workers (int) : number of jobs to run for the pod5 splitting. Defaults to 5. Rough recommendation is to do at most 5M reads per worker ie use >= 10 workers for 50M reads. Doing more just runs the risk of memory and time issues, and the OSC is hardly ever out of CPU space.
+    """
     Path(path_out).mkdir(parents=True, exist_ok=True)
-    if not os.path.isfile(Path(path_out + "/view.txt")) or reset_pod5_view == True :
+    if not os.path.isfile(Path(path_out + "/view.txt")) :
         pod5_view.view_pod5([Path(path_pod5)], Path(path_out + '/view.txt'), include = "read_id, channel", force_overwrite=True, threads=workers)
     view = csv.read_csv(path_out + "/view.txt", parse_options=csv.ParseOptions(delimiter='\t'))
     channels = view.column('channel').unique().to_pylist()
@@ -41,11 +53,11 @@ def pod5_split(path_out, path_pod5, account, mail, reset_pod5_view = False, work
             "#SBATCH --nodes=1 --ntasks-per-node=1\n",
             "#SBATCH --cpus-per-task=4\n",
             "#SBATCH --output=" + path_out + "/logs_split_pod5/" + str(i) + ".out" + "\n",
-            "#SBATCH --mail-type=None\n",
+            "#SBATCH --mail-type=" + mail_type + "\n",
             "#SBATCH --time=04:00:00\n",
             "#SBATCH --mail-user=" + mail + "\n",
             "module load miniconda3/23.3.1-py310\n",
-            "conda activate JSont\n",
+            "conda activate " + python_env + "\n",
             "pod5 subset " + ' '.join(file_chunks[i]) + " --table " + path_out + "/view.txt -o " + path_out + "/split_pod5/ --threads 4 --template '{channel}/{channel}_" + str(i) + ".pod5' -M --columns channel"
         ]
         with open(str(path_out + "/logs_split_pod5/" + str(i) + ".sh"), 'w') as handle:
@@ -54,32 +66,59 @@ def pod5_split(path_out, path_pod5, account, mail, reset_pod5_view = False, work
         subprocess.run(args)
     return
 
-def copy_split_pod5s(path_out, workers = 10) :
+def copy_split_pod5s(path_out, workers_dorado = 1, workers_copying = 10) :
+    """
+    Copies the split pod5 files from pod5_split into folders for each dorado worker in run_dorado_job. Finds pod5s in path_out/split_pod5/ and creates a folder for each dorado worker under path_out/grouped_pod5/. For the sake of speed, this can run in parallel. 
+    
+    Args:
+        path_out (str) : directory to be used as the output folder, same as what was used for pod5_split.
+        workers_dorado (int) : number of folder to split the pod5s into. Should match the number of dorado jobs that you want to run.
+        workers_copying (int) : number of parallel workers to use for the copying process. Defaults to 10.
+    """
     if Path(path_out + '/grouped_pod5/').is_dir() :
         shutil.rmtree(Path(path_out + '/grouped_pod5/'))
     Path(path_out + "/grouped_pod5/").mkdir(parents=True, exist_ok=True)
     channel_folders = [x for x in Path(path_out + "/split_pod5/").iterdir()]
-    channel_folder_chunks = np.array_split( channel_folders, workers )
+    channel_folder_chunks = np.array_split( channel_folders, workers_dorado )
     for i in range(len(channel_folder_chunks)) :
         print("started moving group ", i)
         Path( path_out + "/grouped_pod5/" + str(i) ).mkdir(parents=True, exist_ok=True)
-        with concurrent.futures.ProcessPoolExecutor( max_workers = workers ) as executor :
+        with concurrent.futures.ProcessPoolExecutor( max_workers = workers_copying ) as executor :
             futures = [ executor.submit( shutil.copytree, folder, Path( path_out + "/grouped_pod5/" + str(i) + "/" + folder.stem ) ) for folder in channel_folder_chunks[i] ]
             concurrent.futures.wait( futures )
         print("finished moving group ", i)
     return
 
-def check_pod5_jobs() :
-    args = ['squeue', '-u', 'smith12380', '-v', '-r', '--states=BF,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RS,RV,ST,S,TO', '--format="%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R"']
+def check_pod5_jobs(user) :
+    """
+    Checks squeue to see if any pod5_split jobs are running.
+    
+    Args :
+        user (str) : the OSC username used for the pod5_split jobs.
+    Returns :
+        bool, True if any jobs are found.
+    """
+    args = ['squeue', '-u', user, '-v', '-r', '--states=BF,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RS,RV,ST,S,TO', '--format="%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R"']
     squeue = subprocess.run(args, capture_output=True)
     stdout = str(squeue.stdout)
     squeue_nl_split = stdout.split('\\n')
     for item in squeue_nl_split :
-        if 'pod5' in item :
+        if 'pod5_split' in item :
             return True
     return False
 
-def run_dorado_job(path_out, path_dorado, account, mail, i) :
+def run_dorado_job(path_out, path_dorado, account, mail, mail_type = 'None', i = 0) :
+    """
+    Runs a slurm job for dorado duplexing, sending the output to path_out/basecalled/{i}.sam. Creates a script file in path_out/logs_dorado/, which is also where the .out file from the job will be. Currently is hardcoded to request 1 GPU, 12 CPU cores, 80G memory, and 12 hours.
+    
+    Args :
+        path_out (str) : directory to be used as the output folder. This will fail if it doesn't exist already.
+        path_dorado (str) : path to the dorado executable.
+        account (str) : OSC account to be billed for the compute time.
+        mail (str) : email for any status messages from the jobs.
+        mail_type (str) : type of messages to recieve for the jobs ie 'Start', 'All', 'Error'. Defaults to 'None'
+        i (int) : the worker_ID to be appended to the job script and .sam output file.
+    """
     script = [
         "#!/bin/bash\n",
         "#SBATCH --account=" + account + "\n",
@@ -91,7 +130,7 @@ def run_dorado_job(path_out, path_dorado, account, mail, i) :
         "#SBATCH --gres=gpu:1\n",
         "#SBATCH --time=12:00:00\n",
         "#SBATCH --output=" + path_out + "/logs_dorado/dorado_" + str(i) + ".out" + "\n",
-        "#SBATCH --mail-type=None\n",
+        "#SBATCH --mail-type=" + mail_type + "\n",
         "#SBATCH --mail-user=" + mail + "\n",
         str(path_dorado) + " duplex sup --emit-sam -r -v " + str(path_out) + "/grouped_pod5/" + str(i) + "/ > " + str(path_out) + "/basecalled/" + str(i) + ".sam"
     ]
@@ -101,23 +140,51 @@ def run_dorado_job(path_out, path_dorado, account, mail, i) :
     subprocess.run(args)
     return
 
-def dorado_slurm(path_out, path_dorado, account, mail, workers = 10, skip_split = False) :
+def dorado_slurm(path_out, path_dorado, account, mail, mail_type = 'None', python_env = None, workers_dorado = 1, workers_pod5_copy = 10, skip_split = False, skip_copy = False) :
+    """
+    Run dorado duplex basecalling through slurm jobs. First will split the .pod5 files by sequencing channel using pod5_split(), unless skip_split is set to True. Puts split files under path_out/split_pod5/. Uses check_pod5_jobs() to make sure no pod5_split jobs are running under the current OSC account and will not run if there are, otherwise things will break. Uses copy_split_pod5(0) to copy the split pod5s into a folder for each dorado worker under path_out/grouped_pod5/. Then runs parallel dorado jobs requesting GPUs, several CPUs, and sufficient RAM. Note that this will only run on NVIDIA GPUs with Tensor cores, which are only in the Voltair line and newer. The Owens cluster does not have these, and dorado will not run on it.
+    
+    Args :
+        path_out (str) : directory to be used as the output folder, same as what was used in pod5_split. This will be created if it doesn't exist.
+        path_dorado (str) : path to the dorado executable.
+        account (str) : OSC account to be billed for the compute time.
+        mail (str) : email for any status messages from the jobs.
+        mail_type (str) : type of messages to recieve for the jobs ie 'Start', 'All', 'Error'. Defaults to 'None'
+        python_env (str) : name of your conda environment with pod5 installed. If your files are already split, this is optional.
+        workers_dorado (int) : number of jobs to run for dorado. If you already ran pod5_split, this should be the SAME number of workers as used for that. You'll either leave some reads un-basecalled or run unnecessary jobs if not.
+        workers_pod5_copy (int) : number of workers to use when copying the pod5 files from pod5_split. This just helps speed things up a bit if you're running on multiple cores, it's not super critical.
+        skip_split (bool) : whether to skip over running pod5_split(). Set this to true if you've already run pod5_split or if you're just re-running this function. If False, this will overwrite any existing files.
+        skip_copy (bool) : whether to skip over running copy_split_pod5s(). Set this to true if you're just re-running this function. If False, this will overwrite any existing files.
+    """
+    if not skip_split :
+        pod5_split(path_out, path_pod5, python_env, account, mail, mail_type = 'None', workers = workers_dorado)
     while check_pod5_jobs() :
         print("pod5 spit still running")
         time.sleep(180)
+    if not skip_copy :
+        copy_split_pod5s(path_out, workers_dorado, workers_pod5_copy)
     if Path(path_out + '/basecalled/').is_dir() :
         shutil.rmtree(Path(path_out + '/basecalled/'))
     Path(path_out + "/basecalled/").mkdir(parents=True, exist_ok=True)
     if Path(path_out + '/logs_dorado/').is_dir() :
         shutil.rmtree(Path(path_out + '/logs_dorado/'))
     Path(path_out + "/logs_dorado/").mkdir(parents=True, exist_ok=True)
-    if not skip_split :
-        copy_split_pod5s(path_out, workers)
-    for i in range(workers) :
+    for i in range(workers_dorado) :
         run_dorado_job(path_out, path_dorado, account, mail, i)
     return
 
-def check_dorado_jobs(path_out, path_dorado, account, mail) :
+def check_dorado_jobs(path_out, rerun_broken_jobs = True, path_dorado = None, account = None, mail = None, mail_type = None) :
+    """
+    Checks the .out logs in path_out/logs_dorado/ to make sure that all dorado jobs ran successfully. Checks for any lines in the .out with 'Basecalled' in them, which appears to only be present if dorado has completed basecalling. Unless rerun_broken_jobs is set to False, this will also rerun the broken jobs via run_dorado_job(). path_out, path_dorado, account, mail, and mail_type must all be set to appropriate things in order to the rerun to work. They are only given defaults so that this can be run easily with rerun_broken_jobs = False.
+    
+    Args :
+        path_out (str) : directory used as the path_out folder for dorado.
+        rerun_broken_jobs (bool) : whether or not to rerun any broken jobs that are found. Defaults to True.
+        path_dorado (str) : path to the dorado executable. 
+        account (str) : OSC account to be billed for the compute time.
+        mail (str) : email for any status messages from the jobs.
+        mail_type (str) : type of messages to recieve for the jobs ie 'Start', 'All', 'Error'. Defaults to 'None'
+    """
     dorado_logs = [ x for x in Path(path_out + "/logs_dorado/").iterdir() if x.suffix == '.out' ]
     broken_jobs = []
     for dorado_log in dorado_logs :
@@ -131,11 +198,22 @@ def check_dorado_jobs(path_out, path_dorado, account, mail) :
             name = dorado_log.stem
             i = name.split('_')[1]
             broken_jobs.append(i)
-    for broken_job in broken_jobs :
-        run_dorado_job(path_out, path_dorado, account, mail, broken_job)
+    if rerun_broken_jobs :
+        for broken_job in broken_jobs :
+            run_dorado_job(path_out, path_dorado, account, mail, broken_job)
+    else :
+        print("Broken jobs were found : ", broken_jobs)
     return
 
-def sam_to_parquet(file, path_out, basename_template = None, sam_or_bam = 'sam') :
+def sam_to_parquet(file, path_out, basename_template = None) :
+    """
+    Transfers data from .sam files to an Apache parquet database by going line-by-line through the .sam file and building a pyarrow table. Generates ID, seq, seq_len, and qual tags at minimum, then automatically creates tags for any other content in the .sam file assuming the usual format where of abcd:xyz... where xxxx is the name and anything x and beyond is the value. Also, this skips over all tags in the first ten columns of the .sam, other than the three explicitly pulled tags: ID, seq, and qual. The others do not seem to be used by dorado. Outputs to path_out/pa_dataset/ following the basename_template. Current hardcoded to limit the number of entries in the files to 200000.
+    
+    Args :
+        file (str or Path) : the .sam file to be converted.
+        path_out (str) : the directory being used for output. The /pa_dataset/ folder will be under this directory. Must already exist.
+        basename_template (str) : the template to be used for writing .parquet files. Requires {i} to be present, which will be replaced by a number for each different file created ie 'dataset_A_part_{i}.parquet' where {i} will be 0 for the first file, 1, 2, etc. for subsequent files if the dataset is too large for one file.
+    """
     table_dict = {
         'ID' : [],
         'seq' : [],
@@ -171,14 +249,34 @@ def sam_to_parquet(file, path_out, basename_template = None, sam_or_bam = 'sam')
     return 'done'
 
 def build_parquet_dataset_from_sam(sam_folder, path_out) :
+    """
+    Takes all .sam files in sam_folder and builds an Apache parquet database under path_out/pa_dataset. This function should be parallelized with multiple instances of sam_to_parquet.
+    
+    Args :
+        sam_folder (str) : directory containing .sam files. Does not currently search recursively.
+        path_out (str) : the directory being used for output. The /pa_dataset/ folder will be under this directory. Must already exist.
+    """
     files = [x for x in Path(sam_folder).iterdir() if x.is_file()]
     for file in files :
         print("moving file ", file.stem)
         sam_to_parquet(file, path_out, basename_template = str(file.stem + '_part-{i}.parquet'))
     return 'done'
 
-def find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_length = 0, skip_reverse = False) :
+def find_seq_matches(query_seq, target_seq, max_edit_distance, query_ID = 'None', min_length = 0, skip_reverse = False) :
+    """
+    Finds matches between target_seq and query_seq using edlib.align in both forward and reverse direction, then translates the result into a list of location matches.
     
+    Args :
+        query_seq (str) : sequence to be used as query. This is usually the smaller sequence and within the target.
+        target_seq (str) : sequence to be used as target. This is usually the larger sequence, and the query is meant to be within it.
+        max_edit_distance (int) : the maximum allowable editDistance from an edlib alignment. Anything higher will be discarded. The edit distance is a count of how many characters have to be changed to turn the query into the target.
+        query_ID (str) : the name of the query sequence. Defaults to 'None'.
+        min_length (int) : the minmum allowed length of an alignment. Anything shorter will be discarded.
+        skip_reverse (bool) : whether or not to skip the reverse alignment. Only useful for when aligning two things that have known orientations, ie the distal SSP after assigning the barcode. Defaults to False.
+        
+    Returns :
+        matches (list) : a list of dictionaries for each alignment that meets the requirments.
+    """
     matches = []
     target_seq_len = len(target_seq)
     query_seq_len = len(query_seq)
@@ -209,12 +307,17 @@ def find_seq_matches(target_seq, query_seq, max_edit_distance, query_ID, min_len
                 })
     return matches
 
-def merge_overlapped_indices(index_pairs: list,
-                             tolerated_mismatches: int) -> list:
-    '''
-    Provided a list of (start,end) index pairs, combine overlapping pairs into
-    single pairs that span the full alignment range
-    '''
+def merge_overlapped_indices(index_pairs: list, tolerated_mismatches: int) -> list:
+    """
+    Provided a list of (start,end) index pairs, combine overlapping pairs into single pairs that span the full alignment range.
+    
+    Args :
+        index_pairs (list) : list of [start (int),end (int)] tuples.
+        tolerated_mismatches (int) : number of allowed gap characters between alignments that will still be grouped together.
+        
+    Returns :
+        reduced_pairs (list) : list of condensed [start (int),end (int)] tuples.
+    """
     reduced_pairs = []
     for i, pair in enumerate(index_pairs):
         if i == 0:
@@ -231,15 +334,20 @@ def merge_overlapped_indices(index_pairs: list,
     reduced_pairs.append({'start':current_start,'end':current_end,'length':align_len})
     return reduced_pairs
     
-def find_polyX(sequence: str,
-               X: str,
-               N: int,
-               tolerated_mismatches: int,
-               min_len: int) -> list:
-    '''
-    Find runs of single nucleotides (X), using edlib align with search query X*N
-    with tolerated_mismatches in the search
-    '''
+def find_polyX(sequence: str, X: str, N: int, tolerated_mismatches: int, min_len: int) -> list:
+    """
+    Find runs of single nucleotides (X), using edlib align with search query X*N with tolerated_mismatches in the search
+    
+    Args :
+        sequence (str) : sequence to be searched.
+        X (str) : single character to be used. Must be just 1 character long, not case sensitive.
+        N (int) : number of characters to be considered a polyX sequence.
+        tolerated_mismatches (int) : number of allowed gap characters between alignments that will still be grouped together.
+        min_len (int) : minimum length of the final polyX region(s).
+        
+    Returns :
+        sorted_indices (list) : list of [start (int),end (int)] tuples sorted by length.
+    """
     assert len(X)==1, f'More than one nt provided as quuery ({X}) for find_polyX'
     query = X*N
     alignment = edlib.align(query, sequence, mode='HW', task='locations')
@@ -252,10 +360,19 @@ def find_polyX(sequence: str,
         sorted_indices = sorted(filtered_indices, key=lambda x:x['length'], reverse=True)
         return sorted_indices
     
-def find_polyA_bidirectional(sequence: str,
-                             N: int,
-                             tolerated_mismatches: int,
-                             min_len: int) -> list:
+def find_polyA_bidirectional(sequence: str, N: int, tolerated_mismatches: int, min_len: int) -> list:
+    """
+    Finds any polyA sequences in the sequence in either forward or reverse direction that meets the minimum length.
+    
+    Args :
+        sequence (str) : sequence to be searched.
+        N (int) : number of characters to be considered a polyX sequence.
+        tolerated_mismatches (int) : number of allowed gap characters between alignments that will still be grouped together.
+        min_len (int) : minimum length of the final polyX region(s).
+        
+    Returns :
+        indices (list) : list of [start (int),end (int)] tuples.
+    """
     for_indices = find_polyX(sequence, 'A', N, tolerated_mismatches, min_len)
     rev_indices = find_polyX(utils.reverse_complement(sequence), 'A', N, tolerated_mismatches, min_len)
     indices = []
@@ -268,6 +385,9 @@ def find_polyA_bidirectional(sequence: str,
     return indices
 
 def pick_best_match(matches, min_match_location = [0, 0]) :
+    """
+    Selects the best alignment match from a list. Not currently used... also can't remember how the min_match_location was used.
+    """
     best_match = {
         'query_ID' : 'None matched',
         'edit_distance' : -1,
@@ -292,6 +412,19 @@ def pick_best_match(matches, min_match_location = [0, 0]) :
     return best_match
 
 def evaluate_polyA_UMI_SSP(polyA, UMI_match, SSP_match, polyA_UMI_SSP_set, max_gap = 5) :
+    """
+    Judge a set of polyA, UMI, and SSP alignments based on whether they're in the correct order (polyA, then UMI, then SSP) and are close enough to each other via max_gap. Uses polyA_UMI_SSP_set as a blank template and fills it in. First calculates gaps, then checks if directions of UMI and polyA are matching and their gap is allowable, then fills out the template polyA_UMI_SSP_set from them. 
+    
+    Args :
+        polyA (list): the indices of a polyA sequence from find_polyA_bidirectional(). This is a tuple of the start and end indices [start, end].
+        UMI_match (dict) : the alignment for a UMI, output by find_seq_matches(). This is a dictionary of the alignment attributes.
+        SSP_match (dict) : the alignment for the SSP sequence, output by find_seq_matches(). This is a dictionary of the alignment attributes.
+        polyA_UMI_SSP_set (dict) : a template dict with default values for the keys. The default values are intended to indicate an invalid match, as failing to meet the requirements of this function will result in the default values being returned.
+        max_gap (int) : the maximum gap between the UMI and the polyA and SSP. Defaults to 5.
+    
+    Returns :
+        polyA_UMIT_SSP_set (dict) : the template dict with changed values, corresponding to whether the three alignments form a valid set representing a true barcode.
+    """
     polyA_UMI_gap = abs(polyA['end'] - UMI_match['location'][0])
     UMI_SSP_gap = abs(SSP_match['location'][0] - UMI_match['location'][1])
     if UMI_match['direction'] == polyA['direction'] and polyA_UMI_gap <= max_gap :
@@ -320,6 +453,16 @@ def evaluate_polyA_UMI_SSP(polyA, UMI_match, SSP_match, polyA_UMI_SSP_set, max_g
     return polyA_UMI_SSP_set
     
 def reverse_matches(matches, seq_len) :
+    """
+    Takes match outputs from find_seq_matches and reverses the orientation by subtracting the location indices from the length of the sequence. All matches must at least correspond to the same sequence length, usually the same sequence as well.
+    
+    Args :
+        matches (list) : list of the matches to be reversed.
+        seq_len (int) : length of the sequence that the matches correspond to.
+    
+    Returns :
+        reversed_matches (list) : list of matches after being reversed. They are in the same order as given in matches.
+    """
     reversed_matches = []
     for match in matches :
         reversed_matches.append({
@@ -332,39 +475,33 @@ def reverse_matches(matches, seq_len) :
     return reversed_matches
 
 def parse_polyA_UMI_SSP(seq, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 5, UMI_min_len = 0, SSP_min_len = 0, polyA_N = 4, polyA_tolerated_mismatches = 1, polyA_min_len = 10) :
-#     seq_len = len(seq)
-#     polyAs = find_polyA_bidirectional(seq, N = polyA_N, tolerated_mismatches = polyA_tolerated_mismatches, min_len = polyA_min_len)
-#     UMI_matches = []
-#     SSP_matches = find_seq_matches(seq, SSP, SSP_max_score, 'SSP', min_length = SSP_min_len)
-#     UMI_seq_regions = []
-#     for polyA in polyAs :
-#         region = [ polyA['end'] , min(polyA['end'] + 50, seq_len - 1) , polyA['direction'] ]
-#         if region[1] - region[0] > 0 :
-#             UMI_seq_regions.append(region)
-#     for SSP_match in SSP_matches :
-#         region = [ max(SSP_match['location'][0] - 50, 0) , SSP_match['location'][0] , SSP_match['direction'] ]
-#         if region[1] - region[0] > 0 :
-#             UMI_seq_regions.append(region)
-#     if len(SSP_matches) == 0 :
-#         SSP_matches = [{ 'location' : [-1,-1], 'direction' : 'None', 'edit_distance' : 1000 }]
-#     for UMI in UMIs :
-#         for region in UMI_seq_regions :
-#             if region[2] == 'forward' :
-#                 tmp_UMI_matches = find_seq_matches(seq[region[0] : region[1]], UMI[1], UMI_max_score, UMI[0], min_length = UMI_min_len, skip_reverse = True)
-#             else :
-#                 tmp_UMI_matches = find_seq_matches(utils.reverse_complement(seq)[region[0] : region[1]], UMI[1], UMI_max_score, UMI[0], min_length = UMI_min_len, skip_reverse = True)
-#             if len(tmp_UMI_matches) > 0 :
-#                 for UMI_match in tmp_UMI_matches :
-#                     UMI_match['location'] = [ UMI_match['location'][0] + region[0], UMI_match['location'][1] + region[0] ]
-#                     UMI_matches.append(UMI_match)
+    """
+    Finds potential unique molecular identifiers (UMIs), strand switching primer (SSP), and polyA sequences that meet certain minimum quality criteria, then determines if a UMI can be paired with an SSP and/or polyA alignment to represent a true barcode sequence. 
+    
+    Args :
+        seq (str) : the sequence to be checked.
+        UMIs (list) : list of [name, sequence] pairs for UMIs.
+        SSP (str) : sequence for the SSP.
+        UMI_max_score (int) : maximum edit_distance for the UMI alignments. Any alignments with a higher edit_distance are discarded.
+        SSP_max_score (int) : maximum edit_distance for the SSP alignments. Any alignments with a higher edit_distance are discarded.
+        max_gap (int) : the maximum gap between the UMI and the polyA or SSP. Defaults to 5
+        UMI_min_len (int) : minimum length for the UMI alignments.
+        SSP_min_len (int) : minimum length for the SSP alignments.
+        polyA_N (int) : number of characters to be considered a polyA sequence. Defaults to 4.
+        polyA_tolerated_mismatches (int) : number of allowed gap characters between polyA alignments that will be grouped together into a larger polyA. Defaults to 1.
+        polyA_min_len (int) : minimum length of the final polyX region(s) that will be considered a true polyA. Defaults to 10.
+    
+    Returns :
+        parsed (dict) : dictionary with the final decided attributes for the seq and whether it contains an identifiable UMI/barcode.
+    """
     seq_len = len(seq)
     polyAs = find_polyA_bidirectional(seq, N = polyA_N, tolerated_mismatches = polyA_tolerated_mismatches, min_len = polyA_min_len)
-    SSP_matches = find_seq_matches(seq, SSP, SSP_max_score, 'SSP', min_length = SSP_min_len)
+    SSP_matches = find_seq_matches(SSP, seq, SSP_max_score, 'SSP', min_length = SSP_min_len)
     if len(SSP_matches) == 0 :
         SSP_matches = [{ 'location' : [-1,-1], 'direction' : 'None', 'edit_distance' : 1000 }]
     UMI_matches = []
     for UMI in UMIs :
-        tmp_UMI_matches = find_seq_matches(seq, UMI[1], UMI_max_score, UMI[0], min_length = UMI_min_len)
+        tmp_UMI_matches = find_seq_matches(UMI[1], seq, UMI_max_score, UMI[0], min_length = UMI_min_len)
         if len(tmp_UMI_matches) > 0 :
             for UMI_match in tmp_UMI_matches :
                 UMI_matches.append(UMI_match)
@@ -396,15 +533,7 @@ def parse_polyA_UMI_SSP(seq, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 
                             polyA_UMI_SSP_set = barcode_evaluation
                         elif barcode_evaluation['barcode_ID'] != polyA_UMI_SSP_set['barcode_ID'] :
                             polyA_UMI_SSP_set['barcode_ID'] = 'Multiple'
-                            polyA_UMI_SSP_set['barcode_score'] = barcode_evaluation['barcode_score']
-#     if polyA_UMI_SSP_set['barcode_ID'] == 'None matched' and len(UMI_matches) > 0 :
-#         best_UMI = pick_best_match(UMI_matches, [ 0.8 * seq_len, seq_len ])
-#         polyA_UMI_SSP_set['barcode_ID'] = best_UMI['query_ID']
-#         polyA_UMI_SSP_set['barcode_UMI_start'] = best_UMI['location'][0]
-#         polyA_UMI_SSP_set['barcode_UMI_end'] = best_UMI['location'][1]
-#         polyA_UMI_SSP_set['barcode_UMI_edit_distance'] = best_UMI['edit_distance']
-#         polyA_UMI_SSP_set['direction'] = best_UMI['direction']
-        
+                            polyA_UMI_SSP_set['barcode_score'] = barcode_evaluation['barcode_score']        
     if SSP_matches[0]['direction'] != 'None' :
         SSP_matches = reverse_matches(SSP_matches, seq_len)
     if polyA_UMI_SSP_set['direction'] == 'reverse' :
@@ -438,9 +567,28 @@ def parse_polyA_UMI_SSP(seq, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 
         parsed['biological_seq_indices'] = [ parsed['SSP_end'], parsed['barcode_UMI_start'] ]
     else :
         parsed['biological_seq_indices'] = [ 0, seq_len - 1 ]
-    return parsed
+        return parsed
 
 def debarcode_table(table, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 5, UMI_min_len = 0, SSP_min_len = 0, polyA_N = 4, polyA_tolerated_mismatches = 1, polyA_min_len = 10) :
+    """
+    Takes a pyarrow table with one sequences in each row under a column titled 'seq' and runs parse_polyA_UMI_SSP() on all the reads within.
+    
+    Args :
+        table (pyarrow table) : table with a column called 'seq' with the sequences to be analyzed. Seqs must be strings.
+        UMIs (list) : list of [name, sequence] pairs for UMIs.
+        SSP (str) : sequence for the SSP.
+        UMI_max_score (int) : maximum edit_distance for the UMI alignments. Any alignments with a higher edit_distance are discarded.
+        SSP_max_score (int) : maximum edit_distance for the SSP alignments. Any alignments with a higher edit_distance are discarded.
+        max_gap (int) : the maximum gap between the UMI and the polyA or SSP. Defaults to 5
+        UMI_min_len (int) : minimum length for the UMI alignments.
+        SSP_min_len (int) : minimum length for the SSP alignments.
+        polyA_N (int) : number of characters to be considered a polyA sequence. Defaults to 4.
+        polyA_tolerated_mismatches (int) : number of allowed gap characters between polyA alignments that will be grouped together into a larger polyA. Defaults to 1.
+        polyA_min_len (int) : minimum length of the final polyX region(s) that will be considered a true polyA. Defaults to 10.
+    
+    Returns :
+        table (pyarrow table) : the input table with the output from parse_polyA_UMI_SSP() added as new columns.
+    """
     seqs = table.column('seq').to_pylist()
     parsed_seqs = {
         'barcode_ID' : [],
@@ -470,6 +618,23 @@ def debarcode_table(table, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 5,
     return table
 
 def debarcode_table_from_file(file, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 5, UMI_min_len = 0, SSP_min_len = 0, polyA_N = 4, polyA_tolerated_mismatches = 1, polyA_min_len = 10, resume=False, overwrite=False) :
+    """
+    Load a pyarrow table from a parquet file, then runs passes it to debarcode_table() which runs parse_polyA_UMI_SSP() which attempts to find a barcode in all the sequences within the file. This then saves the table back to file, overwriting the original.
+    
+    Args :
+        UMIs (list) : list of [name, sequence] pairs for UMIs.
+        SSP (str) : sequence for the SSP.
+        UMI_max_score (int) : maximum edit_distance for the UMI alignments. Any alignments with a higher edit_distance are discarded.
+        SSP_max_score (int) : maximum edit_distance for the SSP alignments. Any alignments with a higher edit_distance are discarded.
+        max_gap (int) : the maximum gap between the UMI and the polyA or SSP. Defaults to 5
+        UMI_min_len (int) : minimum length for the UMI alignments.
+        SSP_min_len (int) : minimum length for the SSP alignments.
+        polyA_N (int) : number of characters to be considered a polyA sequence. Defaults to 4.
+        polyA_tolerated_mismatches (int) : number of allowed gap characters between polyA alignments that will be grouped together into a larger polyA. Defaults to 1.
+        polyA_min_len (int) : minimum length of the final polyX region(s) that will be considered a true polyA. Defaults to 10.
+        resume (bool) : whether to resume debarcoding from a paused or broken run. This will only debarcode files that don't already have barcode information in them, so it can't be used to continue a re-debarcoding session, as the files will all still have the original barcode data. Defaults to False
+        overwrite (bool) : whether to allow for overwriting debarcoded files. If True, it will remove any existing barode data and continue with normal debarcoding. If False, it will skip over any files with barcode data.
+    """
     table = pq.read_table(file)
     if 'barcode_ID' in table.column_names :
         if resume == True :
@@ -511,6 +676,9 @@ def debarcode_table_from_file(file, UMIs, SSP, UMI_max_score, SSP_max_score, max
     return
 
 def load_barcodes(path) :
+    """
+    Loads barcodes from a csv where each row is a barcode in the shape of Name,SSP/constant sequence,unique molecular identifier (UMI),polyT-VN sequence. This is not a super critical function, it will be better to just load the barcodes into debarcode() as a list, as the only important things are the UMIs and names.
+    """
     barcodes = []
     with open(path, 'r') as handle :
         for line in handle.readlines() :
@@ -519,6 +687,25 @@ def load_barcodes(path) :
     return barcodes
 
 def debarcode(dataset_dir, UMIs_path, SSP, UMI_max_score, SSP_max_score, max_gap = 5, UMI_min_len = 0, SSP_min_len = 0, polyA_N = 4, polyA_tolerated_mismatches = 1, polyA_min_len = 10, workers = 4, resume=False, overwrite=False ) :
+    """
+    Finds all parquet files within the given dataset directory under dataset_dir, then pushes them through debarcode_table_from_file() to attempt to find barcodes.
+    
+    Args :
+        dataset_dir (str) : the path to the folder containing the parquet files to be debarcoded. Should be path_out/pa_dataset/ where path_out is the same as what was used in build_parquet_dataset_from_sam.
+        UMIs_path (str) : path pointing to a csv to feed to load_barcodes(). This should be changed to just accept a list, instead.
+        SSP (str) : sequence for the SSP.
+        UMI_max_score (int) : maximum edit_distance for the UMI alignments. Any alignments with a higher edit_distance are discarded.
+        SSP_max_score (int) : maximum edit_distance for the SSP alignments. Any alignments with a higher edit_distance are discarded.
+        max_gap (int) : the maximum gap between the UMI and the polyA or SSP. Defaults to 5
+        UMI_min_len (int) : minimum length for the UMI alignments.
+        SSP_min_len (int) : minimum length for the SSP alignments.
+        polyA_N (int) : number of characters to be considered a polyA sequence. Defaults to 4.
+        polyA_tolerated_mismatches (int) : number of allowed gap characters between polyA alignments that will be grouped together into a larger polyA. Defaults to 1.
+        polyA_min_len (int) : minimum length of the final polyX region(s) that will be considered a true polyA. Defaults to 10.
+        workers (int) : number of parallel debarcoding processes to use. Defaults to 4.
+        resume (bool) : whether to resume debarcoding from a paused or broken run. This will only debarcode files that don't already have barcode information in them, so it can't be used to continue a re-debarcoding session, as the files will all still have the original barcode data. Defaults to False
+        overwrite (bool) : whether to allow for overwriting debarcoded files. If True, it will remove any existing barode data and continue with normal debarcoding. If False, it will skip over any files with barcode data.
+    """
     UMIs = load_barcodes(UMIs_path)
     files = [x for x in Path(dataset_dir).iterdir() if x.is_file()]
     split = math.ceil( len(files) / workers )
@@ -530,6 +717,17 @@ def debarcode(dataset_dir, UMIs_path, SSP, UMI_max_score, SSP_max_score, max_gap
     return
 
 def minimap2_table(table, path_ref, preset='splice') :
+    """
+    Runs minimap2 on the biological sequences in a pyarrow table. 
+    
+    Args :
+        table (pyarrow table) : contains sequencing reads as rows. This should only be run after running debarcode(), as it relies on some barcode information.
+        path_ref (str) : path to the sequence reference to be used.
+        preset (str) : the preset to use for minimap2. Defaults to 'splice', which is designed to be splice-aware.
+    
+    Returns :
+        table (pyarrow table) : the input table with minimap alignments appended as new columns.
+    """
     seqs = table.column('seq').to_pylist()
     biological_seq_indices = table.column('biological_seq_indices').to_pylist()
     barcode_scores = table.column('barcode_score').to_pylist()
@@ -583,6 +781,16 @@ def minimap2_table(table, path_ref, preset='splice') :
     return table
 
 def minimap2_table_from_file(file, path_ref, preset='splice', resume=False, overwrite=False) :
+    """
+    Opens a parquet file and feeds the table within to minimap2_table().
+    
+    Args :
+        file (str or Path) : path to the parquet file to be mapped.
+        path_ref (str) : path to the sequence reference to be used.
+        preset (str) : the preset to use for minimap2. Defaults to 'splice', which is designed to be splice-aware.
+        resume (bool) : whether to resume mapping from a paused or broken run. This will only map files that don't already have minimap information in them, so it can't be used to continue a re-mapping session, as the files will all still have the original minimap data. Defaults to False.
+        overwrite (bool) : whether to allow for overwriting mapped files. If True, it will remove any existing minimap data and continue with normal mapping. If False, it will skip over any files with minimap data.
+    """
     print(file, '                  ')
     table = pq.read_table(file)
     if 'minimap2_q_st' in table.column_names :
@@ -604,6 +812,17 @@ def minimap2_table_from_file(file, path_ref, preset='splice', resume=False, over
     return
 
 def minimap2(dataset_dir, path_ref, preset='splice', resume=False, overwrite=False, workers = 4) :
+    """
+    Goes through the parquet dataset in dataset_dir and runs everything through minimap2 to assign sequencing reads to genes. Opens all files individually and runs minimap2_table_from_file(), which also saves the results to disk.
+    
+    Args :
+        dataset_dir (str) : the path to the folder containing the parquet files to be mapped. Should be path_out/pa_dataset/ where path_out is the same as what was used in build_parquet_dataset_from_sam.
+        path_ref (str) : path to the sequence reference to be used. Currently intended to work with a transcripomic reference, as count_mapped_reads will only work with that.
+        preset (str) : the preset to use for minimap2. Defaults to 'splice', which is designed to be splice-aware.
+        resume (bool) : whether to resume mapping from a paused or broken run. This will only map files that don't already have minimap information in them, so it can't be used to continue a re-mapping session, as the files will all still have the original minimap data. Defaults to False.
+        overwrite (bool) : whether to allow for overwriting mapped files. If True, it will remove any existing minimap data and continue with normal mapping. If False, it will skip over any files with minimap data.
+        workers (int) : number of parallel mapping processes to run. Note that minimap2 has high memory requirements, appearing to need about 8-12G per process to be stable. Using less will possisbly result in broken runs which are not currently set to re-run. Defaults to 4.
+    """
     files = [x for x in Path(dataset_dir).iterdir() if x.is_file()]
     split = math.ceil( len(files) / workers )
     files_chunks = np.array_split(np.array(files), split)
@@ -614,10 +833,19 @@ def minimap2(dataset_dir, path_ref, preset='splice', resume=False, overwrite=Fal
     return
 
 def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict, run_label = "None") :
+    """
+    Counts the mapped reads in the dataset_dir and tallies up gene counts, collapsing gene and transcript variants into one count per gene ID. Gene IDs are defined by the name in parentheses in the minimap reference file. Saves the resulting counts as csv.
+    
+    Args :
+        dataset_dir (str) : the path to the folder containing the parquet files to be counted. Should be path_out/pa_dataset/ where path_out is the same as what was used in build_parquet_dataset_from_sam.
+        path_ref (str) : path to the sequence reference to be used. Currently intended to work with a transcripomic reference, essentially in the format of a fastq file where each row is a transcript with a contig ID, then sequence, then some tags. The critical information is the gene ID in parentheses, which must be the last parentheses in the first field of each row. ie XC001.4 Gene Name Etc. (version 1) (Gene ID), sequence, other information.
+        path_out_csv (str) : the full path to where the results should be saved as csv.
+        sample_dict (dict) : a dictionary to define which barcodes belong to what sample names. Must be in the form of 'barcode ID' : 'sample name'.
+        run_label (str) : a label that is assigned to all the reads in this dataset to potentially differentiate them from reads from other runs that might share the same barcode and sample names. Useful for combining reads from two runs with the same samples or if a run fails and is restarted.
+    """
     ref = local_io.read_fastx(path_ref)
     contigs_to_gene_IDs = {}
     gene_IDs = []
-    #NM_000014.6 Homo sapiens alpha-2-macroglobulin (A2M), transcript variant 1, mRNA
     for key in ref.keys() :
         comma_split = key.split(', ')
         space_split = comma_split[0].split(' ')
