@@ -2,6 +2,7 @@ import time
 import os
 from pathlib import Path
 import math
+import subprocess
 import concurrent
 import concurrent.futures
 import pyarrow as pa
@@ -10,10 +11,14 @@ import pyarrow.parquet as pq
 from pyarrow import dataset
 from pyarrow import csv
 import matplotlib.pyplot as plt
+import shutil
 import mappy
+from scipy import stats
 import numpy as np
 from NanoporeAnalysis import utils
 from NanoporeAnalysis import local_io
+from pod5.tools import pod5_view
+from pod5.tools import pod5_subset
 import edlib
 
 def pod5_split(path_out, path_pod5, python_env, account, mail, mail_type = 'None', workers=5) :
@@ -106,7 +111,6 @@ def check_pod5_jobs(user) :
         if 'pod5_split' in item :
             return True
     return False
-
 def run_dorado_job(path_out, path_dorado, account, mail, mail_type = 'None', i = 0) :
     """
     Runs a slurm job for dorado duplexing, sending the output to path_out/basecalled/{i}.sam. Creates a script file in path_out/logs_dorado/, which is also where the .out file from the job will be. Currently is hardcoded to request 1 GPU, 12 CPU cores, 80G memory, and 12 hours.
@@ -140,7 +144,7 @@ def run_dorado_job(path_out, path_dorado, account, mail, mail_type = 'None', i =
     subprocess.run(args)
     return
 
-def dorado_slurm(path_out, path_dorado, account, mail, mail_type = 'None', python_env = None, workers_dorado = 1, workers_pod5_copy = 10, skip_split = False, skip_copy = False) :
+def dorado_slurm(path_out, path_pod5, path_dorado, account, mail, mail_type = 'None', python_env = None, user = None, workers_dorado = 1, workers_pod5_copy = 10, skip_split = False, skip_copy = False) :
     """
     Run dorado duplex basecalling through slurm jobs. First will split the .pod5 files by sequencing channel using pod5_split(), unless skip_split is set to True. Puts split files under path_out/split_pod5/. Uses check_pod5_jobs() to make sure no pod5_split jobs are running under the current OSC account and will not run if there are, otherwise things will break. Uses copy_split_pod5(0) to copy the split pod5s into a folder for each dorado worker under path_out/grouped_pod5/. Then runs parallel dorado jobs requesting GPUs, several CPUs, and sufficient RAM. Note that this will only run on NVIDIA GPUs with Tensor cores, which are only in the Voltair line and newer. The Owens cluster does not have these, and dorado will not run on it.
     
@@ -158,9 +162,9 @@ def dorado_slurm(path_out, path_dorado, account, mail, mail_type = 'None', pytho
     """
     if not skip_split :
         pod5_split(path_out, path_pod5, python_env, account, mail, mail_type = 'None', workers = workers_dorado)
-    while check_pod5_jobs() :
-        print("pod5 spit still running")
-        time.sleep(180)
+    while check_pod5_jobs(user) :
+        print("pod5 split still running")
+        time.sleep(120)
     if not skip_copy :
         copy_split_pod5s(path_out, workers_dorado, workers_pod5_copy)
     if Path(path_out + '/basecalled/').is_dir() :
@@ -170,7 +174,7 @@ def dorado_slurm(path_out, path_dorado, account, mail, mail_type = 'None', pytho
         shutil.rmtree(Path(path_out + '/logs_dorado/'))
     Path(path_out + "/logs_dorado/").mkdir(parents=True, exist_ok=True)
     for i in range(workers_dorado) :
-        run_dorado_job(path_out, path_dorado, account, mail, i)
+        run_dorado_job(path_out, path_dorado, account, mail, mail_type, i)
     return
 
 def check_dorado_jobs(path_out, rerun_broken_jobs = True, path_dorado = None, account = None, mail = None, mail_type = None) :
@@ -202,7 +206,10 @@ def check_dorado_jobs(path_out, rerun_broken_jobs = True, path_dorado = None, ac
         for broken_job in broken_jobs :
             run_dorado_job(path_out, path_dorado, account, mail, broken_job)
     else :
-        print("Broken jobs were found : ", broken_jobs)
+        if len(broken_jobs) != 0 :
+            print("Broken jobs were found : ", broken_jobs)
+        else : 
+            print("No broken jobs found! :D")
     return
 
 def sam_to_parquet(file, path_out, basename_template = None) :
@@ -567,7 +574,7 @@ def parse_polyA_UMI_SSP(seq, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 
         parsed['biological_seq_indices'] = [ parsed['SSP_end'], parsed['barcode_UMI_start'] ]
     else :
         parsed['biological_seq_indices'] = [ 0, seq_len - 1 ]
-        return parsed
+    return parsed
 
 def debarcode_table(table, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 5, UMI_min_len = 0, SSP_min_len = 0, polyA_N = 4, polyA_tolerated_mismatches = 1, polyA_min_len = 10) :
     """
@@ -669,7 +676,7 @@ def debarcode_table_from_file(file, UMIs, SSP, UMI_max_score, SSP_max_score, max
             print("skip no overwrite", file)
             del table
             return
-    print("debarcoding file ", file.stem)
+    print("debarcoding file ", Path(file).stem)
     table = debarcode_table(table, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap, UMI_min_len, SSP_min_len, polyA_N, polyA_tolerated_mismatches, polyA_min_len)
     pq.write_table(table, file)
     del table
@@ -714,6 +721,7 @@ def debarcode(dataset_dir, UMIs_path, SSP, UMI_max_score, SSP_max_score, max_gap
         with concurrent.futures.ProcessPoolExecutor( max_workers=workers ) as executor :
             futures = [ executor.submit( debarcode_table_from_file, file, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap, UMI_min_len, SSP_min_len, polyA_N, polyA_tolerated_mismatches, polyA_min_len, resume, overwrite ) for file in chunk]
             concurrent.futures.wait( futures )
+    print("Finished debarcoding!")
     return
 
 def minimap2_table(table, path_ref, preset='splice') :
@@ -881,69 +889,126 @@ def count_mapped_reads(dataset_dir, path_ref, path_out_csv, sample_dict, run_lab
     print('done')
     return
 
-def generate_priors(path_csv, samples, value_to_check, func_to_check = None, field_to_sort_by = None, N = None) :
+def combine_counts(path_csvs, path_out_csv) :
+    """
+    Combine two counts csv files into a master table in a new location. Intended to be the point where different runs are brought together for analysis. The resulting csv can be used in compare_counts().
+    
+    Args :
+        path_csvs (list) : list of two paths to the csv files to be combined. Should be given as strings.
+        path_out_csv (str) : path to where you want the resulting table to go.
+    """
+    table_1 = csv.read_csv(path_csvs[0], read_options = csv.ReadOptions(block_size = 10000000))
+    table_2 = csv.read_csv(path_csvs[1], read_options = csv.ReadOptions(block_size = 10000000))
+    table_combined = pa.concat_tables([table_1, table_2])
+    csv.write_csv(table_combined, path_out_csv)
+    return
+
+# def add_counts(path_csvs, path_out_csv)
+#     table_1 = csv.read_csv(path_csvs[0], read_options = csv.ReadOptions(block_size = 10000000))
+#     table_2 = csv.read_csv(path_csvs[1], read_options = csv.ReadOptions(block_size = 10000000))
+    
+#     for i in range(table_1.num_rows) :
+#         row_table_1 = table_1.take([i])
+#         sample = row_table_1.column('sample').to_pylist()[0]
+#         barcode_ID = row_table_1.column('barcode_ID').to_pylist()[0]
+#         run_label = row_table_1.column('run_label').to_pylist()[0]
+#         row_table_2 = table_2.filter( pc.field('sample') == sample ).filter( pc.field('barcode_ID') == barcode_ID ).filter( pc.field('run_label') == run_label )
+#         new_row = pa.table({
+#             'sample' = sample,
+#             'barcode_ID' = barcode_ID
+#             'run_label' = run_label
+#         })
+#         for gene in 
+        
+
+def generate_priors(path_csv, samples, funcs_to_check = None, fields_to_check = None, any_or_all = 'all', field_to_sort_by = None, N = None) :
     """
     Uses compare_counts() to generate a list of genes to use as priors for another compare_counts(), meant to make the FDR more useful. This is able to be customized to restrict based on any field in the table output by compare_counts().
     
     Args :
         path_csv (str) : path to the counts csv output by count_reads(). Must have a column per gene plus columns for barcode_ID, gene, and run_label. Each row denotes a different barcode/sample/run.
-        samples (list) : a list of 2 strings ['sample1', 'sample2'] denoting the samples to be compared. The fold changes will be defined as the first sample divided by the second.
-        value_to_check (str) : the field in the compare_counts() table to be used to select genes.
-        func_to_check (function) : a function that accepts the value in the table under value_to_check and outputs a boolean. ie lambda x : if x >= 2. Defaults to None, in which case the function will include all N genes (see below for details on N).
+        samples (list) : a list of 2 strings ['sample_1', 'sample_2'] denoting the samples to be compared. The fold changes will be defined as the first sample divided by the second.
+        funcs_to_check (list) : a list of functions that accept the corresponding value in the table under fields_to_check and outputs a boolean. ie lambda x : if x >= 2. Defaults to None, in which case the function will include all N genes (see below for details on N).
+        fields_to_check (list) : the fields in the compare_counts() table to be used to select genes. Should be made in parallel with funcs_to_check and should be equal length.
+        any_or_all (str) : whether all funcs in funcs_to_check need to be True in order to add the gene as a prior or if a single one will suffice. Must be either 'any' or 'all'.
         field_to_sort_by (str) : the field in the compare_counts() table to be used to sort the reads prior to selection. Only useful if using the N argument to select the first N genes. Defaults to None, in which case the order in the counts csv is preserved, which is sorted by ascending pvalue when originally created by count_mapped_reads().
         N (int) : the number of genes to select. These will be selected from the gene list after sorting by field_to_sort_by. ie if N = 100 and field_to_sort_by = 'padj', this will output the 100 genes with the lowest padj. Defaults to None, in which case all genes will be evaluated, if func_to_check is set.
        
     Returns :
         priors (list) : list of gene IDs to be used as priors for compare_counts().
     """
-    comparison_table = compare_counts(path_csv, samples, make_plot = False)
-    if N == None :
+    comparison_table = compare_counts(path_csv, samples, make_plots = False)
+    print(comparison_table.shape)
+    if N == None or N > comparison_table.num_rows :
         N = comparison_table.num_rows
     if field_to_sort_by != None :
         comparison_table = comparison_table.sort_by(field_to_sort_by)
-    values = comparison_table.column( value_to_check ).to_pylist()
+    values_dict = {}
+    for field in fields_to_check :
+        values_dict[ field ] = comparison_table.column( field ).to_pylist()
     genes = comparison_table.column( 'gene' ).to_pylist()
     priors = []
-    for i in range(N) :
-        if func_to_check != None :
-            if func_to_check(values[i]) :
-                priors.append(genes[i])
+    for i in range(comparison_table.num_rows) :
+        if funcs_to_check != None :
+            gene_bool = True
+            for func, field in zip( funcs_to_check, fields_to_check )  :
+                gene_bool = True
+                if func( values_dict[field] ) :
+                    if any_or_all == 'any' :
+                        gene_bool = True
+                        break
+                else :
+                    gene_bool = False
+                    if any_or_all == 'all' :
+                        break
+            if gene_bool == True :
+                priors.append( genes[i] )
         else :
-            priors.append(gene[i])
+            priors.append(genes[i])
+        if len(priors) == N :
+            break
+    print("Found ", len(priors), " genes to use as priors.")
     return priors
 
-def compare_counts(path_csv, samples, priors = None, make_plot = True) :
+def compare_counts(path_csv, samples, priors = None, make_plots = True, sort_table_by = None, display_table_length = 100) :
     """
     Compares the gene counts in the counts csv between two samples. Converts counts to a fraction of the total number of reads, converts this to logit, uses walsch's t test with unequal variance to determine pvalue, finds the log_2 of the fold change between them, performs p adjustment, and outputs a volcano plot (if set).
     
     Args :
         path_csv (str) : path to the counts csv output by count_reads(). Must have a column per gene plus columns for barcode_ID, gene, and run_label. Each row denotes a different barcode/sample/run.
-        samples (list) : a list of 2 strings ['sample1', 'sample2'] denoting the samples to be compared. The fold changes will be defined as the first sample divided by the second.
+        samples (list) : a list of 2 lists of strings [['sample_1'], ['sample_2']] denoting the samples to be compared. The fold changes will be defined as the first sample(s) divided by the second.
         priors (list) : list of genes to restrict the analysis to. This can be the output from generate_priors(). Defaults to None, in which case all genes are considered.
-        make_plot (bool) : whether or not to make the volcano plot. Uses log_2_diff for the x axis and log_10_pvalue for the y axis and uses the colors column in the comparison_table to define the colors of the data points, which denote points with padj < 0.05. Defaults to True.
+        make_plots (bool) : whether or not to make the volcano plot. Uses log_2_diff for the x axis and log_10_pvalue for the y axis and uses the colors column in the comparison_table to define the colors of the data points, which denote points with padj < 0.05. Defaults to True.
         
     Returns :
         comparison_table (pyarrow table) : a table with each gene as a row and columns for gene, log_2_diff, pvalue, log_10_pvalue, padj, and color.
     """
     counts = csv.read_csv(path_csv, read_options = csv.ReadOptions(block_size = 10000000))
-    comparison_dict = {'gene' : [], 'log_2_diff' : [], 'pvalue' : [], 'log_10_pvalue' : []}
-    counts_sample_1 = counts.filter(pc.field('sample') == samples[0]).drop_columns(['barcode_ID', 'sample', 'run_label'])
-    counts_sample_2 = counts.filter(pc.field('sample') == samples[1]).drop_columns(['barcode_ID', 'sample', 'run_label'])
-    genes_to_check = counts_sample_1.column_names if priors == None else priors
-    counts_total_1 = 0
-    counts_total_2 = 0
+        
+    comparison_dict = {'gene' : [], 'log_2_diff' : [], 'pvalue' : [], 'log_10_pvalue' : [], 'sample_1_values' : [], 'sample_2_values' : []}
+    mask = [ sample in samples[0] for sample in counts.column('sample').to_pylist() ]
+    counts_sample_1 = counts.filter(mask).drop_columns(['barcode_ID', 'sample', 'run_label'])
+    mask = [ sample in samples[1] for sample in counts.column('sample').to_pylist() ]
+    counts_sample_2 = counts.filter(mask).drop_columns(['barcode_ID', 'sample', 'run_label'])
+    
+    count_totals_sample_1 = [ 0 for i in range(counts_sample_1.num_rows) ]
+    count_totals_sample_2 = [ 0 for i in range(counts_sample_2.num_rows) ]
     for column in counts_sample_1.itercolumns() :
-        for value in column :
-            counts_total_1 += value.as_py()
+        values = column.to_pylist()
+        for j in range(counts_sample_1.num_rows) :
+            count_totals_sample_1[j] += values[j]
     for column in counts_sample_2.itercolumns() :
-        for value in column :
-            counts_total_2 += value.as_py()
+        values = column.to_pylist()
+        for j in range(counts_sample_2.num_rows) :
+            count_totals_sample_2[j] += values[j]
+    print(count_totals_sample_1, count_totals_sample_2)
+    genes_to_check = counts_sample_1.column_names if priors == None else priors
     for gene in genes_to_check :
         sample_1_values = counts_sample_1.column(gene).to_pylist()
         sample_2_values = counts_sample_2.column(gene).to_pylist()
         if 0 not in sample_1_values and 0 not in sample_2_values and ( min(sample_1_values) >= 5 or min(sample_2_values) >= 5 )  :
-            sample_1_logit = [np.log(x / counts_total_1) - np.log(1 - (x / counts_total_1)) for x in sample_1_values]
-            sample_2_logit = [np.log(x / counts_total_2) - np.log(1 - (x / counts_total_2)) for x in sample_2_values]
+            sample_1_logit = [np.log(sample_1_values[i] / count_totals_sample_1[i]) - np.log(1 - (sample_1_values[i] / count_totals_sample_1[i])) for i in range(len(sample_1_values))]
+            sample_2_logit = [np.log(sample_2_values[i] / count_totals_sample_2[i]) - np.log(1 - (sample_2_values[i] / count_totals_sample_2[i])) for i in range(len(sample_2_values))]
             dof = len(sample_1_logit) + len(sample_2_logit) - 2
             t_test = stats.ttest_ind(sample_1_logit, sample_2_logit, equal_var = False)
             unlogit_mean_sample_1 = np.exp(np.mean(sample_1_logit)) / ( 1 - np.exp(np.mean(sample_1_logit)) )
@@ -953,6 +1018,8 @@ def compare_counts(path_csv, samples, priors = None, make_plot = True) :
             comparison_dict['log_2_diff'].append(log_2_diff)
             comparison_dict['pvalue'].append(t_test.pvalue)
             comparison_dict['log_10_pvalue'].append(-np.log10(t_test.pvalue))
+            comparison_dict['sample_1_values'].append( str(sample_1_values) )
+            comparison_dict['sample_2_values'].append( str(sample_2_values) )
     comparison_table = pa.table(comparison_dict).sort_by('pvalue')
     significant = True
     padjs = []
@@ -978,28 +1045,64 @@ def compare_counts(path_csv, samples, priors = None, make_plot = True) :
             colors.append('black')
     comparison_table = comparison_table.append_column('padj', [padjs])
     comparison_table = comparison_table.append_column('color', [colors])
-    if make_plot :
+    if make_plots :
         plt.scatter(comparison_table.column('log_2_diff').to_pylist(), comparison_table.column('log_10_pvalue').to_pylist(), c = comparison_table.column('color').to_pylist(), s = 2)
+        plt.show()
+        if sort_table_by != None :
+            comparison_table = comparison_table.sort_by(sort_table_by)
+        print( "%20s%15s%15s%15s%15s%7s%20s%20s" % ('gene', 'log_2_diff', 'pvalue', 'log_10_pvalue', 'padj', 'color', 'sample_1_values', 'sample_2_values') )
+        for row in comparison_table.to_pylist()[:display_table_length] :
+            print('%(gene)20s%(log_2_diff)15.10f%(pvalue)15.10f%(log_10_pvalue)15.10f%(padj)15.10f%(color)7s%(sample_1_values)20s%(sample_2_values)20s' % row)
     return comparison_table
 
 def qc_metrics(path_dataset) :
-    table = pq.read_table(path_dataset, columns = ['seq_len', 'barcode_score', 'barcode_ID', 'SSP_edit_distance'])
+    """
+    What this should do:
+    """
+    table = pq.read_table(path_dataset, columns = ['seq_len', 'barcode_ID', 'barcode_flag', 'SSP_edit_distance'])
     qc = {}
     hist_max = 5000
     fig1, qc['alignment_scores_hist'] = plt.subplots(2,2, sharex=True, sharey=True)
-
-    group_1 = table.filter(pc.field('barcode_score') <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') <= 5)
+    barcode_flags = table.column('barcode_flag').to_pylist()
+    SSP_edit_distances = table.column('SSP_edit_distance').to_pylist()
+    mask_1 = []
+    mask_2 = []
+    mask_3 = []
+    mask_4 = []
+    print("making masks")
+    for i in range( len(barcode_flags) ) :
+        mask_1_value = False
+        mask_2_value = False
+        mask_3_value = False
+        mask_4_value = False
+        if barcode_flags[i][1] == 1 :
+            if SSP_edit_distances[i] <= 5 :
+                mask_1_value = True
+            else :
+                mask_2_value = True
+        else :
+            if SSP_edit_distances[i] <= 5 :
+                mask_3_value = True
+            else :
+                mask_4_value = True
+        mask_1.append(mask_1_value)
+        mask_2.append(mask_2_value)
+        mask_3.append(mask_3_value)
+        mask_4.append(mask_4_value)
+    print('done making masks')
+    group_1 = table.filter(mask_1)
     qc['alignment_scores_hist'][0,0].hist(group_1.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
-    qc['alignment_scores_hist'][0,0].set_title('Passed Barcode and Strand Switch', {'fontsize': 10})
-    group_2 = table.filter(pc.field('barcode_score') <= 20).filter(pc.field('barcode_ID') != 'Multiple').filter(pc.field('SSP_edit_distance') > 5)
+    qc['alignment_scores_hist'][0,0].set_title('Passed Barcode and Strand Switch: ' + str(group_1.num_rows), {'fontsize': 5})
+    group_2 = table.filter(mask_2)
     qc['alignment_scores_hist'][0,1].hist(group_2.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
-    qc['alignment_scores_hist'][0,1].set_title('Passed Barcode, failed Strand Switch', {'fontsize': 10})
-    group_3 = table.filter(pc.field('barcode_score') > 20).filter(pc.field('SSP_edit_distance') <= 5)
+    qc['alignment_scores_hist'][0,1].set_title('Passed Barcode, failed Strand Switch: ' + str(group_2.num_rows), {'fontsize': 5})
+    group_3 = table.filter(mask_3)
     qc['alignment_scores_hist'][1,0].hist(group_3.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
-    qc['alignment_scores_hist'][1,0].set_title('Failed Barcode, passed Strand Switch', {'fontsize': 10})
-    group_4 = table.filter(pc.field('barcode_score') > 20).filter(pc.field('SSP_edit_distance') > 5)
+    qc['alignment_scores_hist'][1,0].set_title('Failed Barcode, passed Strand Switch: ' + str(group_3.num_rows), {'fontsize': 5})
+    group_4 = table.filter(mask_4)
     qc['alignment_scores_hist'][1,1].hist(group_4.column('seq_len').to_pylist(), bins=50, range=(0, hist_max))
-    qc['alignment_scores_hist'][1,1].set_title('Failed Barcode and Strand Switch', {'fontsize': 10})
+    qc['alignment_scores_hist'][1,1].set_title('Failed Barcode and Strand Switch: ' + str(group_4.num_rows), {'fontsize': 5})
+
 
     barcodes = table.column('barcode_ID').unique().to_pylist()
     for barcode in barcodes :
