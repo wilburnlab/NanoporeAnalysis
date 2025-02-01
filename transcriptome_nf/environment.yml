@@ -1,0 +1,12 @@
+name: transcriptome_nf
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.9
+  - dorado=0.2.0
+  - mmseqs2=13-45111
+  - samtools=1.14
+  - numpy
+  - pip

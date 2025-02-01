@@ -3,17 +3,11 @@ Local I/O Functions
 '''
 import gzip
 from pathlib import Path
-import numpy as np
+
 
 class FileContentsError(RuntimeError):
     pass
-        
-def decode_phred(score_str: str) -> np.array:
-    '''
-    Decode a quality score string into a numpy array
-    '''
-    #return np.array(list(bytes(score_str,'ascii')))
-    return np.array( [ord(x) for x in score_str] )
+
 
 def read_fastx(file_name: str | Path,
                first_word: bool = False) -> dict:
@@ -26,36 +20,73 @@ def read_fastx(file_name: str | Path,
     file_name = Path(file_name)
     file_opener = gzip.open if file_name.suffix == '.gz' else open
     with file_opener(file_name, 'rt') as fastx:
+        # Determine file type
         first_line = fastx.readline()
         assert first_line[0] in ['>','@'], 'Invalid file '+file_name
         mode = 'a' if first_line[0] == '>' else 'q'
         fastx.seek(0)
+        
         if mode == 'a': # FASTA
             for line in fastx:
                 line = line.rstrip()
                 if line[0] == '>': # New seq
                     name = line[1:].split(' ')[0] if first_word else line[1:]
-                    seq_dict[name] = ''
+                    seq_dict[name] = {'Sequence':'', 'Quality':None, 'Tags':None}
                 else:
-                    seq_dict[name] += line
+                    seq_dict[name]['Sequence'] += line
         else: # FASTQ
             while True:
-                name = fastx.readline().rstrip()
+                header = fastx.readline().rstrip()
+                if len(header) == 0: break
                 sequence = fastx.readline().rstrip()
                 fastx.readline()
-                score = decode_phred( fastx.readline().rstrip() )
-                if len(name) == 0: break
-                if '\t' in name :
-                    split = name.split('\t')
-                    seq_dict[split[0]] = { 'Sequence' : sequence, 'Score' : score , 'Tags' : split[1:]}
-                else : 
-                    seq_dict[name] = { 'Sequence' : sequence, 'Score' : score }
+                qual = fastx.readline().rstrip()
+
+                if header.find('\t') >= 0:
+                    elements = header.split('\t')
+                    name = header[0][1:]
+                    tags = header[1:]
+                else:
+                    name = header[1:]
+                    tags = []
+                seq_dict[name] = {'Sequence':sequence, 'Quality':qual, 'Tags':tags }
                     
     # Ensure there are sequences in the file
     if not seq_dict:
         raise FileContentsError(f'No sequences found in FAST{mode.upper()} file: {file_name}')
     
     return seq_dict
+
+
+def write_fastx(file_name: str | Path,
+                seq_dict: dict,
+                chars_per_line: int = None,
+                append: bool = False,
+                reduced_name: bool = False):
+    extension = file_name.split('.')[-1]
+    assert extension in ['fasta','fa','fastq','fq'], f"Invalid extension for {file_name}"
+    out_mode = 'a' if extension in ['fasta','fa'] else 'q'
+
+    write_mode = 'a' if append else 'w'
+    file_name = Path(file_name)
+    with open(file_name, write_mode) as fout:
+        if out_mode == 'q': # FASTQ
+            for name, r in seq_dict.items():
+                fout.write(f"@{name}\n{r['Sequence']}\n+\n{r['Quality']}\n")
+        else: # FASTA
+            for name, r in seq_dict.items():
+                seq = r['Sequence']
+                if reduced_name:
+                    name = name.split(' ')[0]
+                if chars_per_line:
+                    seq = '\n'.join([seq[i:i+chars_per_line]
+                                    for i in range(0,
+                                                    len(seq),
+                                                    chars_per_line)])
+                fout.write(f">{name}\n{seq}\n")
+            
+    return None
+
 
 
 def write_fasta(file_name: str | Path, 
@@ -94,10 +125,38 @@ def write_fasta(file_name: str | Path,
             if reduced_name:
                 name = name.split(' ')[0]
             if chars_per_line:
-                seq = '\n'.join([seq[i:i+chars_per_line] for i in range(0,len(seq),chars_per_line)])
-            fout.write(f'>{name}\n{seq}\n')
+                seq = '\n'.join([seq[i:i+chars_per_line]
+                                 for i in range(0,
+                                                len(seq),
+                                                chars_per_line)])
+            fout.write(f">{name}\n{seq}\n")
     return None
             
+
+
+
+
+def sam_to_fastx(sam_file: str,
+                 output_file: str):
+    '''
+    Process sam file, return output
+    '''
+    # Process SAM file
+    sam_fields = ['QNAME', 'FLAG', 'RNAME', 'POS', 'MAPQ', 'CIGAR', 
+                  'RNEXT', 'PNEXT', 'TLEN', 'SEQ', 'QUAL']
+    with open(output_file, 'w') as fout:
+        mode = 'q' if output_file.split('.')[-1] in ['fq', 'fastq'] else 'a'
+        for line in open(sam_file):
+            if line[0] == '@': continue
+            items = line.rstrip().split('\t')
+            sam_dict = dict(zip(sam_fields, items[:11]))
+            if mode == 'a':
+                fout.write(f">{sam_dict['QNAME']}\n{sam_dict['SEQ']}\n")
+            elif mode == 'q':
+                fout.write(f"{sam_dict['QNAME']}\n{sam_dict['SEQ']}\n+\n{sam_dict['QUAL']}\n")
+
+
+
 '''           
             
             if mode == 'a': # FASTA
