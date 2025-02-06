@@ -10,6 +10,7 @@ from cigar import Cigar
 import numpy as np
 import edlib
 from NanoporeAnalysis.utils import reverse_complement as rc
+from NanoporeAnalysis.utils import return_best_orf
 
 def align(query: str,
           subject: str,
@@ -225,6 +226,9 @@ def annotate_read(read: dict,
     pre_polyA, post_polyA, polyA_stats = split_sequence_by_polyA(sequence)
     primer_3_score, umi_scores = parse_adapter3_seq(post_polyA, primer3, umis)
     transcript_seq, adapter5_seq, primer_5_score, primer5_trim_idx = parse_adapter5_seq(pre_polyA, ssp)
+
+    # Construct sample label
+    sample_label = f"{read['Source']}_{umi_scores['Best UMI']}"
     
     ## Analyze the identified transcript sequence
     if transcript_seq is not None:
@@ -236,8 +240,6 @@ def annotate_read(read: dict,
     else:
         transcript_len = None
         transcript_qual = None
-
-
 
     t_scores = np.array([primer_5_score, primer_3_score, umi_scores['Best UMI Score']])
     if np.all(t_scores == None): # Garbage read
@@ -256,40 +258,33 @@ def annotate_read(read: dict,
                 cDNA_status = 'Unknown' 
     if transcript_len is not None and transcript_len < min_transcript_len:
         cDNA_status += ' Fragment'
-    '''
-        if np.all(end_scores != None):
-            cDNA_status = 'Complete'
-        else:
-            cDNA_status = '5\' Only' if end_scores[1] == None else '3\' Only'
-        if transcript_len < min_transcript_len:
-            cDNA_status += ' Fragment'
-
-    if primer_3_score is not None and primer_5_score is not None:
-        cDNA_status = 'Complete'
-    else:
-        if primer_3_score is not None:
-            cDNA_status = '3\' Only'
-        elif primer_5_score is not None:
-            cDNA_status = '5\' Only'
-        else:
-            cDNA_status = 'Unknown'
-    '''
+    
+    
 
     ## Collate the annotations
-    read_annotations = { '3\' primer':                 primer3,
-                         '3\' primer alignment score': primer_3_score,
-                         '3\' adapter sequence':       post_polyA,
-                         'Strand switch primer':       ssp,
-                         'SSP alignment score':        primer_5_score,
-                         '5\' adapter trim':           primer5_trim_idx,
-                         '5\' adapter sequence':       adapter5_seq,
-                         'Transcript sequence':        transcript_seq,
-                         'Transcript quality':         transcript_qual,
-                         'Transcript length':          transcript_len,
-                         'cDNA status':                cDNA_status
+    read_annotations = {'Sample_ID':                  sample_label,
+                        '3\' primer':                 primer3,
+                        '3\' primer alignment score': primer_3_score,
+                        '3\' adapter sequence':       post_polyA,
+                        'Strand switch primer':       ssp,
+                        'SSP alignment score':        primer_5_score,
+                        '5\' adapter trim':           primer5_trim_idx,
+                        '5\' adapter sequence':       adapter5_seq,
+                        'Transcript sequence':        transcript_seq,
+                        'Transcript quality':         transcript_qual,
+                        'Transcript length':          transcript_len,
+                        'cDNA status':                cDNA_status
                        }
+
+    ## Add ORF search results
+    if cDNA_status in ['Complete', '3\' Only']:
+        transcript_for_orf = transcript_seq
+    else:
+        transcript_for_orf = None
+    best_orf = return_best_orf(transcript_for_orf)
+
     
-    return read | read_stats | polyA_stats | umi_scores | read_annotations
+    return read | read_stats | polyA_stats | umi_scores | read_annotations | best_orf
     
 
     '''

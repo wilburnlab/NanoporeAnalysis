@@ -15,7 +15,7 @@ from NanoporeAnalysis.reference_data import NUCLEOTIDES, RESIDUES, CODONS, CODON
 def timer( start, ):
     return str( datetime.timedelta( seconds=round( time.time() - start ) ) )
 
-def return_count_dict(record_dict: dict,
+def return_count_dict(records_input: dict | list,
                       key: str,
                       descending = True):
     '''
@@ -23,7 +23,12 @@ def return_count_dict(record_dict: dict,
     compute a count dictionary of the provided key within the records, and
     return the sorted dictionary by count (default is highest values first)
     '''
-    record_values = [r.get(key,None) for r in record_dict.values()]
+    #print(list(record_dict.items())[:10])
+    if type(records_input) == type({}): # Need to get records from values
+        records = list(records_input.values())
+    else: # Assume list or other type of array
+        records = list(records_input)
+    record_values = [r.get(key,None) for r in records]
     unique_values = set(record_values)
     n_per_unique = dict(zip(unique_values, [0]*len(unique_values)))
     for v in record_values:
@@ -100,6 +105,11 @@ def len_check(sequence: str,
     seq_len = len(sequence)
     return seq_len >= min_len and seq_len <= max_len
 
+def return_null_orf():
+    return dict([(k,None) for k in 
+                 ['ORF','Protein','ORF_start','ORF_end',
+                  'ORF_strand','Protein_length','n']])
+
 
 def orf_searcher(dna_sequence: str,
                  min_length: int = 30,
@@ -109,6 +119,9 @@ def orf_searcher(dna_sequence: str,
     '''
     Generate a list of records describing potential ORFs in a given DNA sequence
     '''
+
+    if dna_sequence is None:
+        return []
 
     ORF_search = regex.compile('ATG(?:...){2,}?(?:TAG|TAA|TGA|TRA|TAR)')
 
@@ -140,13 +153,14 @@ def orf_searcher(dna_sequence: str,
             orf_length = len(orf)
             end_pos = start_pos + orf_length - 1
 
-            record = {'ORF': orf,
-                      'Protein': protein,
-                      'ORF_start': start_pos,
-                      'ORF_end': end_pos,
-                      'ORF_strand': strand_label,
-                      'Protein_length': len(protein),
-                      'n': 1}
+            record = return_null_orf()
+            record['ORF'] = orf
+            record['Protein'] = protein
+            record['ORF_start'] = start_pos
+            record['ORF_end'] = end_pos
+            record['ORF_strand'] = strand_label
+            record['Protein_length'] = len(protein)
+            record['n'] = 1
             records.append(record)
 
     # Prune records of internal ORFs
@@ -169,3 +183,21 @@ def orf_searcher(dna_sequence: str,
         out_path = os.path.join(dir, out_filename)
         pickle.dump(records, open(out_path, 'wb'))
         return None
+
+
+def return_best_orf(dna_sequence: str,
+                    min_length: int = 30,
+                    both_strands: bool = False,
+                    longest_only: bool = True):
+    candidate_orfs = orf_searcher(dna_sequence,
+                                  min_length,
+                                  both_strands,
+                                  longest_only)
+    if len(candidate_orfs) > 0:
+        sorted_orfs = sorted(candidate_orfs, 
+                             key=lambda x:x['Protein_length'], 
+                             reverse=True)
+        best_orf = sorted_orfs[0]
+    else:
+        best_orf = return_null_orf()
+    return best_orf

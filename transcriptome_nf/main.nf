@@ -5,41 +5,76 @@ nextflow.enable.dsl=2
 workflow {
     // Header
 
-    //Check for output directory
-    ensure_output_dirs()
-
-    sam_files = Channel.fromPath("${params.sam_dir}/*.sam")
-    parquet_files = sam_to_parquet(sam_files)
+    batch_results = generate_batches("${params.input}")
+    read_batches = batch_results.batches | flatten
+    processing_results = process_reads(read_batches)
+    protein_results = extract_proteins(processing_results.collect())
 
 }
 
-
-
-// Process definitions
-process ensure_output_dirs {
-    """
-    mkdir -p "${params.parquet_dir}"
-    """
-}
-
-
-process sam_to_parquet {
-    label 'local'
-
-    publishDir "${params.parquet_dir}", mode: 'copy'
+process generate_batches {
+    //label 'local'
+    
+    //scratch true // Write batches to $TMPDIR
+    //stageInMode 'copy'
 
     input:
-    path sam_file
+    path sam_file // can be individual sam or directory of sam files
 
     output:
-    path "${sam_file.baseName}.parquet"
+    path "${params.read_batch_dir}/*.sam", emit: batches
 
     script:
     """
-    python ${baseDir}/scripts/process_sam.py \\
+    mkdir -p "${params.read_batch_dir}"
+    python ${baseDir}/scripts/batch_sam.py \\
            "${sam_file}" \\
+           "${params.read_batch_size}" \\
+           "${params.read_batch_dir}"
+    """
+
+}
+
+
+process process_reads {
+    //label 'local'
+
+    publishDir "${params.proc_read_dir}", mode: 'copy'
+
+    input:
+    path read_batch
+
+    output:
+    path "${read_batch.baseName}.pqt"
+
+    script:
+    """
+    mkdir -p "${params.proc_read_dir}"
+    python ${baseDir}/scripts/process_sam.py \\
+           "${read_batch}" \\
            "${params.primer_file}" \\
-           "${sam_file.baseName}.parquet"
+           "${read_batch.baseName}.pqt"
+    """
+}
+
+
+
+process extract_proteins {
+
+    publishDir "${launchDir}", mode: 'copy'
+
+    input:
+    path pqt_paths
+
+    output:
+    path "${params.out_label}_proteins.fasta"
+    path "${params.out_label}_protein-counts.tab"
+
+    script:
+    """
+    python ${baseDir}/scripts/extract_proteins.py \\
+           "${params.out_label}" \\
+           ${pqt_paths}
     """
 }
 

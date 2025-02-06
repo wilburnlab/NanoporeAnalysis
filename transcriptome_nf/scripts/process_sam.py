@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from NanoporeAnalysis.local_io import read_fastx
-from NanoporeAnalysis.utils import reverse_complement as rc
+from NanoporeAnalysis.utils import reverse_complement, return_best_orf
 from NanoporeAnalysis.align import process_read
 
 
@@ -21,10 +21,10 @@ def process_sam_file(sam_file: str,
     
     ## Process primer file
     primers = read_fastx(primer_file)
-    ssp = primers['SSP']
-    primer3 = rc(primers[list(primers)[0]][:25])
+    ssp = primers['SSP']['Sequence']
+    primer3 = reverse_complement(primers[list(primers)[0]]['Sequence'][:25])
     p3_len = len(primer3)
-    umis = dict([(f"BC{p[7:9]}",primers[p][p3_len:p3_len+16]) 
+    umis = dict([(f"BC{p[7:9]}",primers[p]['Sequence'][p3_len:p3_len+16]) 
                  for p in primers if p[:2] == 'dT'])
 
     # Process SAM file
@@ -37,6 +37,7 @@ def process_sam_file(sam_file: str,
         sam_dict = dict(zip(sam_fields, items[:11]))
         for x in items[11:]:
             sam_dict[x[:4]] = x[5:]
+        sam_dict['Source'] = sam_file[:sam_file.rfind('_')] # Remove batch ID
         sam_dict = process_read(sam_dict, ssp, primer3, umis)
         records.append(sam_dict)
         
