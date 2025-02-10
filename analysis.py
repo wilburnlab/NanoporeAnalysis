@@ -26,6 +26,7 @@ def generate_priors(path_csv, samples, funcs_to_check = None, fields_to_check = 
         any_or_all (str) : whether all funcs in funcs_to_check need to be True in order to add the gene as a prior or if a single one will suffice. Must be either 'any' or 'all'.
         field_to_sort_by (str) : the field in the compare_counts() table to be used to sort the reads prior to selection. Only useful if using the N argument to select the first N genes. Defaults to None, in which case the order in the counts csv is preserved, which is sorted by ascending pvalue when originally created by count_mapped_reads().
         N (int) : the number of genes to select. These will be selected from the gene list after sorting by field_to_sort_by. ie if N = 100 and field_to_sort_by = 'padj', this will output the 100 genes with the lowest padj. Defaults to None, in which case all genes will be evaluated, if func_to_check is set.
+        min_avg_count (any number not null or inf) : only genes with a total average counts value above min_avg_counts will be included. 
        
     Returns :
         priors (list) : list of gene IDs to be used as priors for compare_counts().
@@ -59,155 +60,128 @@ def generate_priors(path_csv, samples, funcs_to_check = None, fields_to_check = 
     print("Found ", len(priors), " genes to use as priors.")
     return priors
 
-def compare_counts(path_csv, samples, priors = None, neg_priors = None, gene_names = None, make_plots = True, print_results = True, sort_table_by = None, display_table_length = 100, min_avg_count = 10, use_padj = True, save_fig = False) :
+def compare_counts(path_csv, samples, priors = None, neg_priors = None, make_plots = True, print_results = True, sort_table_by = None, display_table_length = 100, min_avg_count = 10, use_padj = True, save_fig = False) :
     """
-    Compares the gene counts in the counts csv between two samples. Converts counts to a fraction of the total number of reads, converts this to logit, uses walsch's t test with unequal variance to determine pvalue, finds the log_2 of the fold change between them, performs p adjustment, and outputs a volcano plot (if set).
+    Compares the gene counts in the counts csv between two samples. Converts counts to a fraction of the total number of reads per barcode, converts this to logit space,
+        uses walsch's t test with unequal variance to determine pvalue, finds the log_2 of the fold change between them, performs benjamini-hochberg pvalue adjustment,
+        and outputs a volcano plot (if set) and prints the resulting comparison table (if set). This comparison can be restricted to certain genes through the priors,
+        neg_priors, and min_avg_count options, but this won't change the calculation for total reads per barcode. The propogated error is also calculated for the fold_changes.
+        This error can be applied to the log_2_fold_change by raising 2 to the log_2_fold_change value, then adding or subtracting the propogated_error. This produces an undefined
+        value when the error is greater than the fold change, which usually indicates that the fold change isn't very accurate.
     
     Args :
-        path_csv (str) : path to the counts csv output by count_reads(). Must have a column per gene plus columns for barcode_ID, gene, and run_label. Each row denotes a different barcode/sample/run.
-        samples (list) : a list of strings ['sample_1', 'sample_2'] denoting the samples to be compared. The fold changes will be defined as the first sample(s) divided by the second.
-        priors (list) : list of genes to restrict the analysis to. This can be the output from generate_priors(). Defaults to None, in which case all genes are considered.
-        make_plots (bool) : whether or not to make the volcano plot. Uses log_2_fold_change for the x axis and log_10_pvalue for the y axis and uses the colors column in the comparison_table to define the colors of the data points, which denote points with padj < 0.05. Defaults to True.
+        path_csv (str) : path to the counts csv output by count_reads(). Must have a column per gene plus columns for barcode_ID, gene, and run_label.Each row denotes a different barcode/sample/run.
+        samples (list) : a list of strings ['sample_1', 'sample_2'] denoting the samples to be compared. The fold changes will be defined as the first sample divided by the second.
+        priors (list or dict) : list of genes to restrict the analysis to, or a dict of gene:log_2_fold_change. This can be the output from generate_priors().
+            If this is set, then only genes included in priors will be shown in color in plots and included in the pvalue adjustment.
+            If priors is a dict (such as the output of generate_priors()), then the colors of the resulting plot will represent the values in the priors dict.
+        neg_priors (list or dict) : list of genes to block from analysis. This can be the output from generate_priors().
+            If this is a dict, then genes will only be blocked if the sign of the log_2_fold_change of the gene matches the sign of the value in the neg_priors dict.
+            Genes in neg_priors will be shown in black on the plot if neg_priors is a list or if it's a dict and the signs match.
+        make_plots (bool) : whether or not to make the volcano plot. Uses log_2_fold_change for the x axis and -log_10(pvalue) for the y axis and uses the colors
+            column in the comparison_table to define the colors of the data points. Defaults to True.
+        print_results (bool) : whether or not to print the table of comparison values.
+        sort_table_by (list of tuples of (field, direction) pairs) : the fields to sort the results table by. Must be a list of tuples, such as [('pvalue', 'ascending')].
+        display_table_length (int) : number of rows of the results table to print. Defaults to 100 so your screen doesn't get totally filled.
+        min_avg_count (any number not null or inf) : only genes with a total average counts value above min_avg_counts will be included in this analysis. 
+        use_padj (bool) : whether or not to color the plot based on the padj instead of pvalue.
+        save_fig (str) : path to save the plot to. If None, the plot won't be saved. Recommended to save as a .svg file.
         
     Returns :
-        comparison_table (pyarrow table) : a table with each gene as a row and columns for gene, log_2_fold_change, pvalue, log_10_pvalue, padj, and color.
+        comparison_table (pyarrow table) : a table with each gene as a row and columns for gene, log_2_fold_change, pvalue, padj, color, sample_1_values, sample_2_values, and propogated_error.
     """
-    counts = csv.read_csv(path_csv, read_options = csv.ReadOptions(block_size = 10000000)).to_pydict()
-    gene_IDs_proper = []
-    gene_IDs_degenerate = []
-    with open("/fs/ess/PAS2506/Users/Vlad/Ref_seqs/GRCh38_latest_genomic_v1.bed", 'r') as bed_handle :
-        for line in bed_handle.readlines() :
-            bed_split = line.split('\t')
-            if bed_split[0][0:2] == 'NC' :
-                gene_IDs_proper.append(bed_split[3])
-            else :
-                gene_IDs_degenerate.append(bed_split[3])
-    for gene in gene_IDs_degenerate :
-        if gene in counts :
-            if '-' in gene[5:] :
-                last_dash = gene.rfind('-')
-                try :
-                    end_num = int(gene[last_dash+1:])
-                    gene_base = gene[:last_dash]
-                    if gene_base in gene_IDs_proper and gene_base in counts :
-                        degen_values = counts[gene]
-                        proper_values = counts[gene_base]
-                        new_values = [ x+y for x, y in zip(degen_values, proper_values) ]
-                        del counts[gene]
-                        counts[gene_base] = new_values
-                except :
-                    pass
-    counts = pa.table(counts)
-    comparison_dict = {'gene' : [], 'log_2_fold_change' : [], 'pvalue' : [], 'neg_log_10_pvalue' : [], 'sample_1_values' : [], 'sample_2_values' : [], 'sample_1_values_norm' : [], 'sample_2_values_norm' : [], 'log_bounds' : []}
-    counts_sample_1 = counts.filter( pc.field('sample') == samples[0] ).drop_columns(['barcode_ID', 'sample', 'run_label'])
-    counts_sample_2 = counts.filter( pc.field('sample') == samples[1] ).drop_columns(['barcode_ID', 'sample', 'run_label'])
-    count_totals_sample_1 = []
-    count_totals_sample_2 = []
-    for row in counts_sample_1.to_pylist() :
-        count_totals_sample_1.append(sum(list(row.values())))
-    for row in counts_sample_2.to_pylist() :
-        count_totals_sample_2.append(sum(list(row.values())))
-    barcodes_sample_1 = counts.filter( pc.field('sample') == samples[0] ).column('barcode_ID').to_pylist()
-    barcodes_sample_2 = counts.filter( pc.field('sample') == samples[1] ).column('barcode_ID').to_pylist()
-    print(count_totals_sample_1, count_totals_sample_2)
-    print(barcodes_sample_1, barcodes_sample_2)
-    if gene_names != None :
-        columns = [ x for x in gene_names if x in counts.column_names ]
-        counts_sample_1 = counts_sample_1.select(columns)
-        counts_sample_2 = counts_sample_2.select(columns)
-    counts_sample_1 = counts_sample_1.to_pydict()
-    counts_sample_2 = counts_sample_2.to_pydict()
-    genes = list(counts_sample_1.keys())
-    for gene in genes :
-        sample_1_values = counts_sample_1[gene]
-        sample_2_values = counts_sample_2[gene]
-        if np.mean(sample_1_values) >= min_avg_count and np.mean(sample_2_values) >= min_avg_count :
-            sample_1_normalized = [ max(sample_1_value, 0.1) / count_totals_sample_1 for sample_1_value, count_totals_sample_1 in zip(sample_1_values, count_totals_sample_1) ]
-            sample_2_normalized = [ max(sample_2_value, 0.1) / count_totals_sample_2 for sample_2_value, count_totals_sample_2 in zip(sample_2_values, count_totals_sample_2) ]
-            sample_1_logit = [ np.log( value ) - np.log( 1 - value ) for value in sample_1_normalized ]
-            sample_2_logit = [ np.log( value ) - np.log( 1 - value ) for value in sample_2_normalized ]
-            t_test = stats.ttest_ind(sample_1_logit, sample_2_logit, equal_var = False)
-            mean_sample_1 = np.mean(sample_1_normalized)
-            mean_sample_2 = np.mean(sample_2_normalized)
-            diff_ratio = mean_sample_2 / mean_sample_1
-            log_2_fold_change = np.log2( diff_ratio )
-            sample_1_stdev = np.std( sample_1_normalized, ddof = len(sample_1_normalized) - 1 )
-            sample_2_stdev = np.std( sample_2_normalized, ddof = len(sample_2_normalized) - 1 )
-            diff_error = diff_ratio * np.sqrt( ((sample_1_stdev/mean_sample_1)**2) + ((sample_2_stdev/mean_sample_2)**2) )
-            if diff_error < diff_ratio :
-                lower_log_bound = np.log2(diff_ratio - diff_error)
-            else :
-                lower_log_bound = None
-            upper_log_bound = np.log2(diff_ratio + diff_error)
-            comparison_dict['gene'].append(gene)
-            comparison_dict['log_2_fold_change'].append(log_2_fold_change)
-            comparison_dict['pvalue'].append(t_test.pvalue)
-            comparison_dict['neg_log_10_pvalue'].append(-np.log10(t_test.pvalue))
-            comparison_dict['sample_1_values'].append( sample_1_values )
-            comparison_dict['sample_2_values'].append( sample_2_values )
-            comparison_dict['sample_1_values_norm'].append( sample_1_normalized )
-            comparison_dict['sample_2_values_norm'].append( sample_2_normalized )
-            comparison_dict['log_bounds'].append( [lower_log_bound, upper_log_bound] )
+    counts = csv.read_csv(path_csv, read_options = csv.ReadOptions(block_size = 10000000)).filter(pc.field('sample').isin(samples))
+    comparison_dict = {'gene' : [], 'log_2_fold_change' : [], 'pvalue' : [], 'sample_1_values' : [], 'sample_2_values' : [], 'propogated_error' : []}
+    sample_IDs = counts.column('sample').to_pylist()
+    counts_values = counts.drop_columns(['barcode_ID', 'sample', 'run_label'])
+    per_row_totals = pa.array([ pc.sum(list(x.values())) for x in counts_values.to_pylist() ])
+    genes_above_min_avg = [ x for x in counts_values.column_names if pc.mean(counts_values.column(x)).as_py() >= min_avg_count ]
+    counts_passed = counts_values.select(genes_above_min_avg)
+    counts_passed_labeled = counts_passed.append_column('sample', [sample_IDs])
+    comparison_dict['sample_1_values'] = counts_passed_labeled.filter(pc.field('sample') == samples[0]).drop_columns(['sample']).to_pydict().values()
+    comparison_dict['sample_2_values'] = counts_passed_labeled.filter(pc.field('sample') == samples[1]).drop_columns(['sample']).to_pydict().values()
+    comparison_dict['gene'] = counts_passed.column_names
+    fill_array = pa.array([ 0.1 for x in range(counts_passed.num_rows) ])
+    counts_filled = pa.Table.from_arrays( [ pc.max_element_wise(x, fill_array) for x in counts_passed.itercolumns() ], counts_passed.column_names )
+    counts_normalized = pa.Table.from_arrays( [ pc.divide( x, per_row_totals ) for x in counts_filled.itercolumns() ], counts_filled.column_names )
+    counts_normalized_labeled = counts_normalized.append_column('sample', [sample_IDs])
+    counts_logits = pa.Table.from_arrays( [ pc.subtract( pc.ln(x), pc.ln(pc.subtract( 1, x ))) for x in counts_normalized.itercolumns() ], counts_normalized.column_names )
+    counts_logits_labeled = counts_logits.append_column('sample', [sample_IDs])
+    sample_1_means = [ pc.mean(x) for x in counts_normalized_labeled.filter(pc.field('sample') == samples[0]).drop_columns(['sample']).itercolumns() ]
+    sample_2_means = [ pc.mean(x) for x in counts_normalized_labeled.filter(pc.field('sample') == samples[1]).drop_columns(['sample']).itercolumns() ]
+    sample_1_logits = counts_logits_labeled.filter(pc.field('sample') == samples[0]).drop_columns(['sample']).to_pydict().values()
+    sample_2_logits = counts_logits_labeled.filter(pc.field('sample') == samples[1]).drop_columns(['sample']).to_pydict().values()
+    comparison_dict['pvalue'] = [ stats.ttest_ind(x, y, equal_var = False).pvalue for x, y in zip(sample_1_logits, sample_2_logits) ]
+    fold_changes = pc.divide(sample_2_means, sample_1_means)
+    comparison_dict['log_2_fold_change'] = pc.log2(fold_changes)
+    sample_1_stddevs = [ pc.stddev( x, ddof = len(x) - 1 ) for x in counts_normalized_labeled.filter(pc.field('sample') == samples[0]).drop_columns(['sample']).itercolumns() ]
+    sample_2_stddevs = [ pc.stddev( x, ddof = len(x) - 1 ) for x in counts_normalized_labeled.filter(pc.field('sample') == samples[1]).drop_columns(['sample']).itercolumns() ]
+    comparison_dict['propogated_error'] = pc.multiply( fold_changes, pc.sqrt(pc.add( pc.power( pc.divide(sample_1_stddevs, sample_1_means), 2 ), pc.power(pc.divide(sample_2_stddevs, sample_2_means), 2 ) )))
     comparison_table = pa.table(comparison_dict).sort_by('pvalue')
+    black_genes = []
+    grey_genes = []
+    if type(neg_priors) == list :
+        black_genes += neg_priors
+    elif type(neg_priors) == dict :
+        for x in neg_priors :
+            if x in comparison_table.column('gene').to_pylist() :
+                if np.sign(neg_priors[x]) == np.sign(comparison_table.filter(pc.field('gene') == x).to_pylist()[0]['log_2_fold_change']) :
+                    black_genes.append(x)
+    if type(priors) == list :
+        grey_genes += [ x for x in comparison_table.column('gene').to_pylist() if x not in priors + black_genes ]
+    elif type(priors) == dict :
+        grey_genes += [ x for x in comparison_table.column('gene').to_pylist() if x not in list(priors.keys()) + black_genes ]
+    color_genes = [ x for x in comparison_table.column('gene').to_pylist() if x not in grey_genes + black_genes ]
+    N = len(color_genes)
+    significant = True
+    rank = 1
     padjs = []
     colors = []
     sizes = []
-    p_values = comparison_table.column('pvalue').to_pylist()
-    log_2_fold_change = comparison_table.column('log_2_fold_change').to_pylist()
-    significant = True
-    N = comparison_table.num_rows if priors == None else len(priors)
-    rank = 1
     for row in comparison_table.to_pylist() :
-        skip = False
-        if priors == None :
-            if neg_priors != None :
-                if row['gene'] in neg_priors :
-                    if np.sign(row['log_2_fold_change']) == np.sign(neg_priors[row['gene']]) :
-                        padjs.append(1)
-                        colors.append('black')
-                        sizes.append(1)
-                        skip = True
-            if not skip :
-                padj = (row['pvalue'] * N) / rank
-                padjs.append( padj )
-                if ( padj <= 0.05 and significant == True ) or use_padj == False :
-                    if row['log_2_fold_change'] > 0 :
-                        colors.append('red')
-                    elif row['log_2_fold_change'] < 0 :
-                        colors.append('blue')
+        if row['gene'] in color_genes :
+            padj = (row['pvalue'] * N) / rank
+            padjs.append( padj )
+            if type(priors) == dict :
+                if priors[row['gene']] > 0 :
                     sizes.append(20)
+                    colors.append('red')
                 else :
-                    colors.append('grey')
-                    sizes.append(1)
-                    significant = False
-                rank += 1
-        elif priors != None :
-            if neg_priors != None :
-                if row['gene'] in neg_priors :
-                    if np.sign(row['log_2_fold_change']) == np.sign(neg_priors[row['gene']]) :
-                        padjs.append(1)
-                        colors.append('black')
-                        sizes.append(1)
-                        skip = True
-            if not skip :
-                if row['gene'] in priors :
-                    padjs.append( (row['pvalue'] * N) / rank )
-                    if priors[row['gene']] > 0 :
-                        colors.append( 'red' )
-                    elif priors[row['gene']] < 0 :
-                        colors.append( 'blue' )
                     sizes.append(20)
-                    rank += 1
-                else :
-                    padjs.append(1)
-                    colors.append('grey')
-                    sizes.append(1)
+                    colors.append('blue')
+            elif ( padj <= 0.05 and significant == True ) or use_padj == False :
+                if row['log_2_fold_change'] > 0 :
+                    colors.append('red')
+                elif row['log_2_fold_change'] < 0 :
+                    colors.append('blue')
+                sizes.append(20)
+            else :
+                colors.append('grey')
+                sizes.append(1)
+                significant = False
+            rank += 1
+        elif row['gene'] in grey_genes :
+            padjs.append(1)
+            colors.append('grey')
+            sizes.append(1)
+        elif row['gene'] in black_genes :
+            padjs.append(1)
+            colors.append('black')
+            sizes.append(1)
     comparison_table = comparison_table.append_column('padj', [padjs])
     comparison_table = comparison_table.append_column('color', [colors])
     comparison_table = comparison_table.append_column('size', [sizes])
+    comparison_table = comparison_table.sort_by([('size', 'descending')])
     if make_plots :
         fig, ax = plt.subplots(1)
-        ax.scatter(comparison_table.column('log_2_fold_change').to_pylist(), comparison_table.column('neg_log_10_pvalue').to_pylist(), c = colors, s = sizes)
+        ax.scatter(comparison_table.filter(pc.field('color')=='grey').column('log_2_fold_change').to_pylist(),
+                   pc.negate(pc.log10(comparison_table.filter(pc.field('color')=='grey').column('pvalue'))).to_pylist(),
+                   c = comparison_table.filter(pc.field('color')=='grey').column('color').to_pylist(),
+                   s = comparison_table.filter(pc.field('color')=='grey').column('size').to_pylist())
+        ax.scatter(comparison_table.filter(pc.field('color')!='grey').column('log_2_fold_change').to_pylist(),
+                   pc.negate(pc.log10(comparison_table.filter(pc.field('color')!='grey').column('pvalue'))).to_pylist(),
+                   c = comparison_table.filter(pc.field('color')!='grey').column('color').to_pylist(),
+                   s = comparison_table.filter(pc.field('color')!='grey').column('size').to_pylist())
         ax.set_xlim(-3, 3)
         ax.set_ylim(0,4)
         ax.set_xlabel(r"log$_2$( fold change )", fontsize=15)
@@ -220,9 +194,9 @@ def compare_counts(path_csv, samples, priors = None, neg_priors = None, gene_nam
     if priors != None and use_padj == True :
         comparison_table = comparison_table.filter( ~ (pc.field('color').isin(['grey', 'black'])) )
     if print_results :
-        print( "%25s%15s%15s%15s%7s%20s%20s%15s" % ('gene', 'log_2_fold_change', 'pvalue', 'padj', 'color', 'sample_1_values', 'sample_2_values', 'log_bounds') )
+        print( "%25s%15s%15s%15s%7s%20s%20s%15s" % ('gene', 'log_2_fold_change', 'pvalue', 'padj', 'color', 'sample_1_values', 'sample_2_values', 'propogated_error') )
         for row in comparison_table.to_pylist()[:display_table_length] :
-            print('%(gene)25s%(log_2_fold_change)15.10f%(pvalue)15.10f%(padj)15.10f%(color)7s %(sample_1_values)20s %(sample_2_values)20s %(log_bounds)15s' % row)
+            print('%(gene)25s%(log_2_fold_change)15.10f%(pvalue)15.10f%(padj)15.10f%(color)7s %(sample_1_values)20s %(sample_2_values)20s %(propogated_error)15s' % row)
     return comparison_table
 
 def qc_metrics(path_dataset) :
