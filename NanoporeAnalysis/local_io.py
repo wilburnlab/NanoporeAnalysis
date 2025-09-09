@@ -22,14 +22,14 @@ def read_fastx(file_name: str | Path,
     with file_opener(file_name, 'rt') as fastx:
         # Determine file type
         first_line = fastx.readline()
-        assert first_line[0] in ['>','@'], 'Invalid file '+file_name
+        assert first_line[0] in ['>','@'], f"Invalid file {file_name}"
         mode = 'a' if first_line[0] == '>' else 'q'
         fastx.seek(0)
         
         if mode == 'a': # FASTA
             for line in fastx:
                 line = line.rstrip()
-                if line[0] == '>': # New seq
+                if len(line) > 0 and line[0] == '>': # New seq
                     name = line[1:].split(' ')[0] if first_word else line[1:]
                     seq_dict[name] = {'Sequence':'', 'Quality':None, 'Tags':None}
                 else:
@@ -63,7 +63,8 @@ def write_fastx(file_name: str | Path,
                 chars_per_line: int = None,
                 append: bool = False,
                 reduced_name: bool = False):
-    extension = file_name.split('.')[-1]
+    file_name = Path(file_name) # Ensure the path is Path object
+    extension = file_name.suffix[1:] #split('.')[-1]
     assert extension in ['fasta','fa','fastq','fq'], f"Invalid extension for {file_name}"
     out_mode = 'a' if extension in ['fasta','fa'] else 'q'
 
@@ -153,7 +154,7 @@ def sam_to_fastx(sam_file: str,
             if mode == 'a':
                 fout.write(f">{sam_dict['QNAME']}\n{sam_dict['SEQ']}\n")
             elif mode == 'q':
-                fout.write(f"{sam_dict['QNAME']}\n{sam_dict['SEQ']}\n+\n{sam_dict['QUAL']}\n")
+                fout.write(f"@{sam_dict['QNAME']}\n{sam_dict['SEQ']}\n+\n{sam_dict['QUAL']}\n")
 
 
 

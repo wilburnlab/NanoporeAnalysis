@@ -15,6 +15,9 @@ from NanoporeAnalysis.reference_data import NUCLEOTIDES, RESIDUES, CODONS, CODON
 def timer( start, ):
     return str( datetime.timedelta( seconds=round( time.time() - start ) ) )
 
+#def return_null_seq_dict():
+#    return {'Sequence':None}
+
 def return_count_dict(records_input: dict | list,
                       key: str,
                       descending = True):
@@ -72,13 +75,15 @@ def encode_phred(phred_array: np.ndarray) -> str:
     return ''.join(chr(score+33) for score in phred_array)
 
 
-def translate(sequence: str) -> str:
+def translate(sequence: str,
+              strict_dna: bool = True) -> str:
     '''
     Translate DNA sequence to protein
     '''
 
-    observed_alphabet = identify_alphabet(sequence)
-    assert observed_alphabet == 'DNA', 'Attempted to translate non-DNA sequence: ' + sequence
+    if strict_dna:
+        observed_alphabet = identify_alphabet(sequence)
+        assert observed_alphabet == 'DNA', 'Attempted to translate non-DNA sequence: ' + sequence
 
     dna_sequence = sequence.strip().upper()
     if len(dna_sequence) < 3:
@@ -115,6 +120,7 @@ def orf_searcher(dna_sequence: str,
                  min_length: int = 30,
                  both_strands: bool = False,
                  longest_only: bool = True,
+                 strict_dna: bool = True,
                  dir=None) -> list:
     '''
     Generate a list of records describing potential ORFs in a given DNA sequence
@@ -139,7 +145,7 @@ def orf_searcher(dna_sequence: str,
         orfs = ORF_search.findall(sequence, overlapped=True)
 
         for orf in set(orfs):
-            translation = translate(orf)
+            translation = translate(orf, strict_dna)
             if translation.count('.') != 1:
                 continue  # Limit to 1 stop codon
             protein = translation[:-1]
@@ -188,11 +194,13 @@ def orf_searcher(dna_sequence: str,
 def return_best_orf(dna_sequence: str,
                     min_length: int = 30,
                     both_strands: bool = False,
-                    longest_only: bool = True):
+                    longest_only: bool = True,
+                    strict_dna: bool = True):
     candidate_orfs = orf_searcher(dna_sequence,
                                   min_length,
                                   both_strands,
-                                  longest_only)
+                                  longest_only,
+                                  strict_dna)
     if len(candidate_orfs) > 0:
         sorted_orfs = sorted(candidate_orfs, 
                              key=lambda x:x['Protein_length'], 
