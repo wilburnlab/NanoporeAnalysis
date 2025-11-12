@@ -1,4 +1,4 @@
-    '''
+'''
 From parquet files generate ORF and Protein quant tables
 '''
 
@@ -30,7 +30,7 @@ def process_pqts(pqt_paths: list,
     counts = dict([(c,return_count_dict(records,c)) for c in columns])
 
     # Filter singleton proteins
-    counts['Protein'] = dict([i for i in counts['Protein'].items() if i[1] > 1])
+    #counts['Protein'] = dict([i for i in counts['Protein'].items() if i[1] > 1])
     proteins = list(counts['Protein'])
     n_proteins = len(proteins)
 

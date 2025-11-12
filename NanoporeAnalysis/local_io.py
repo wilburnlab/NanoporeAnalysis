@@ -4,6 +4,9 @@ Local I/O Functions
 import gzip
 from pathlib import Path
 
+from pod5 import Reader
+import polars as pl
+
 
 class FileContentsError(RuntimeError):
     pass
@@ -189,3 +192,25 @@ def sam_to_fastx(sam_file: str,
 
     return seq_dict
 '''
+
+
+def read_pod5(file_name: str|Path,
+              out_file: str|Path = None):
+    '''
+    Read a pod5 file to a polars dataframe
+    '''
+    file_name = Path(file_name)
+    records = {'rid':[], 'sr':[], 'size':[], 'adc':[], 'pa':[]}
+    with Reader(file_name) as r:
+        for read in r.reads():
+            records['rid'].append(str(read.read_id)) # name
+            records['sr'].append(read.run_info.sample_rate) # Hz
+            records['size'].append(read.signal_pa.size) # N
+            records['adc'].append(read.signal) # raw ADC counts (int16)
+            records['pa'].append(read.signal_pa) # applies per-read calibration, picoAmp
+
+    if out_file is not None:
+        out_file = Path(out_file)
+        df.write_parquet(out_file)
+    return pl.DataFrame(records)
+

@@ -45,7 +45,7 @@ process process_reads {
     path read_batch
 
     output:
-    path "${read_batch.baseName}.pqt"
+    path "${read_batch.baseName}.parquet"
 
     script:
     """
@@ -53,7 +53,7 @@ process process_reads {
     python ${baseDir}/scripts/process_sam.py \\
            "${read_batch}" \\
            "${params.primer_file}" \\
-           "${read_batch.baseName}.pqt"
+           "${read_batch.baseName}.parquet"
     """
 }
 
@@ -64,7 +64,7 @@ process extract_proteins {
     publishDir "${launchDir}", mode: 'copy'
 
     input:
-    path pqt_paths
+    path parquet_paths
 
     output:
     path "${params.out_label}_proteins.fasta"
@@ -74,7 +74,7 @@ process extract_proteins {
     """
     python ${baseDir}/scripts/extract_proteins.py \\
            "${params.out_label}" \\
-           ${pqt_paths}
+           ${parquet_paths}
     """
 }
 

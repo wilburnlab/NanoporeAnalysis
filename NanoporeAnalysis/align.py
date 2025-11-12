@@ -2,10 +2,10 @@
 Tools for performing and manipulating sequence alignments
 '''
 
-import scipy.stats
-from skbio.alignment import StripedSmithWaterman
-from .utils import reverse_complement
-from cigar import Cigar
+#import scipy.stats
+#from skbio.alignment import StripedSmithWaterman
+#from .utils import reverse_complement
+#from cigar import Cigar
 
 import numpy as np
 import edlib
@@ -372,13 +372,19 @@ def process_read(read: dict,
                 analysis = f_analysis
                 analysis['cDNA status'] = 'Complex' #f"{f_analysis['cDNA status']}_{r_analysis['cDNA status']}"
 
+    # Encode movemap if present in the read data
+    if 'mv:B' in analysis:
+        analysis['ts'] = np.int32(analysis['ts:i'])
+        movemap = analysis['mv:B'].split(',')
+        analysis['stride'] = np.int16(movemap[1])
+        analysis['movemap'] = np.asarray(movemap[2:],'uint8')
+
     return analysis
         
 
+'''
 
 
-
-    '''
     #if np.max([list(forward_analysis['UMI Scores'].values())[0],list(reverse_analysis['UMI Scores'].values())[0]]) > min_umi_score:
     #if np.max([d[umi] for d in [forward_analysis, reverse_analysis] for umi in umis]) > min_umi_score:
     if np.max([a['PolyA score'] for a in [for_analysis, rev_analysis]]) > min_polyA_score:
@@ -416,7 +422,7 @@ def process_read(read: dict,
     analysis['Best UMI Score'] = best_umi_score
     analysis['Delta UMI Score'] = delta_umi_score
     return analysis #, forward_analysis, reverse_analysis
-    '''
+
 
 def align_to_dict(align_result):
     """Convert a skbio.alignment object into a simple dict.
@@ -701,3 +707,5 @@ def show_alignment_simple(alignments, line_length=100):
         print(' '*line_length)
         
     return
+
+'''
