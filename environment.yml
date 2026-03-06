@@ -1,0 +1,17 @@
+name: nanopore-dev
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - polars
+  - pyarrow
+  - edlib
+  - pod5
+  - pip
+  - pip:
+    - pytest
+    - ruff
+    - pre-commit

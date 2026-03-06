@@ -149,4 +149,19 @@ Vendored GFF3-to-BED converter (MIT license, Anthony Aylward). Slated for remova
 
 ## Testing Conventions and Tooling
 
-<!-- TODO: Fill in testing framework, test structure, and conventions -->
+- **Test framework**: pytest, configured in `pyproject.toml` under `[tool.pytest.ini_options]`.
+- **Test location**: `tests/` directory. Test files named `test_<module>.py`.
+- **Running tests**: `pytest` from the project root. Use `pytest -v` for verbose output.
+- **Linter**: ruff, configured in `pyproject.toml` under `[tool.ruff]`. Rules: E, F, I, UP, B, SIM. Line length 120. Target Python 3.9.
+- **Run linter**: `ruff check NanoporeAnalysis/ tests/` (add `--fix` to auto-fix).
+- **Pre-commit**: `.pre-commit-config.yaml` runs ruff lint + format checks on commit via `ruff-pre-commit`. Install with `pre-commit install`.
+- **CI**: GitHub Actions (`.github/workflows/ci.yml`) runs ruff lint and pytest on Python 3.9/3.11/3.12 for pushes and PRs to `main`.
+- **Package install**: `pip install -e ".[dev]"` installs the package in editable mode with dev dependencies (pytest, ruff, pre-commit).
+- **Dev environment**: `environment.yml` at project root defines a conda environment (`nanopore-dev`) with all runtime and dev dependencies.
+
+### Design decisions
+- **ruff over flake8/black/isort**: Single tool replaces linter + formatter + import sorter. Fast, minimal config. The `ruff-pre-commit` hook is used rather than running ruff via a `local` hook, so pre-commit manages its own ruff version independently.
+- **pyproject.toml as single config source**: All project metadata, build config, pytest settings, and ruff settings live in `pyproject.toml`. No `setup.py`, `setup.cfg`, `tox.ini`, or separate `.flake8`/`.isort.cfg` files.
+- **Ruff rule selection**: E (pycodestyle), F (pyflakes), I (isort), UP (pyupgrade), B (bugbear), SIM (simplify). E501 (line length) is ignored since the formatter handles wrapping. These rules catch real bugs and style issues without being noisy.
+- **CI matrix**: Tests run on Python 3.9 (minimum supported), 3.11, and 3.12. Linting runs once on latest Python. CI installs via `pip install -e ".[dev]"` rather than conda to keep the workflow simple and fast.
+- **regex as a runtime dependency**: Added to `pyproject.toml` since `utils.py` imports it (used by `orf_searcher` for possessive quantifiers not available in the stdlib `re` module).

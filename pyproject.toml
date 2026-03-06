@@ -1,0 +1,51 @@
+[project]
+name = "NanoporeAnalysis"
+version = "0.1.0"
+description = "Processing library for Oxford Nanopore cDNA sequencing data"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "edlib",
+    "numpy",
+    "polars",
+    "pyarrow",
+    "regex",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "pre-commit",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["NanoporeAnalysis*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501", # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["NanoporeAnalysis"]
