@@ -70,7 +70,7 @@ def assign_gene_ID_rna(table, path_ref) :
             minimap2_gene_IDs.append(contigs_to_gene_IDs[ctg])
     return table.append_column('minimap2_gene_ID', [minimap2_gene_IDs])
 
-def minimap2_table(table, path_ref, preset='splice', path_bed=None, skip_duplex_parents=True) :
+def minimap2_table(table, path_ref, preset='splice', path_bed=None, skip_duplex_parents=False) :
     """
     Runs minimap2 on the biological sequences in a pyarrow table. 
     
@@ -83,15 +83,23 @@ def minimap2_table(table, path_ref, preset='splice', path_bed=None, skip_duplex_
         table (pyarrow table) : the input table with minimap alignments appended as new columns.
     """
     if skip_duplex_parents and 'dx:i' in table.column_names :
-        skip_table = table.filter( (pc.field('dx:i') == '-1') & ( pc.field('barcode_ID').isin(['none matched', 'multiple']) ) )
-        valid_table = table.filter( (pc.field('dx:i') != '-1') & ( ~ pc.field('barcode_ID').isin(['none matched', 'multiple']) ) )
+        skip_table = table.filter( pc.field('barcode_ID').isin(['none matched', 'multiple', None]) )
+        valid_table = table.filter( (pc.field('dx:i') != '-1') & ( ~ pc.field('barcode_ID').isin(['none matched', 'multiple', None]) ) )
     else :
-        skip_table = table.filter( pc.field('barcode_ID').isin(['none matched', 'multiple']) )
-        valid_table = table.filter( ~ pc.field('barcode_ID').isin(['none matched', 'multiple']) )
+        skip_table = table.filter( pc.field('barcode_ID').isin(['none matched', 'multiple', None]) )
+        valid_table = table.filter( ~ pc.field('barcode_ID').isin(['none matched', 'multiple', None]) )
     seqs = valid_table.column('seq').to_pylist()
-    biological_seq_indices = valid_table.column('barcode_biological_seq_indices').to_pylist()
-    barcode_flags = valid_table.column('barcode_flag').to_pylist()
-    directions = valid_table.column('barcode_direction').to_pylist()
+    if ('barcode_biological_seq_indices' in valid_table.column_names) :
+        biological_seq_indices = valid_table.column('barcode_biological_seq_indices').to_pylist()
+        barcode_flags = valid_table.column('barcode_flag').to_pylist()
+        directions = valid_table.column('barcode_direction').to_pylist()
+    else :
+        if 'seq_len' in valid_table.column_names :
+            biological_seq_indices = [ [0, x] for x in valid_table.column('seq_len').to_pylist() ]
+        else :
+            biological_seq_indices = [ [0, len(x)] for x in valid_table.column('seq').to_pylist() ]
+        barcode_flags = np.full((valid_table.num_rows,1,3), [1,1,1])[:,0,:]
+        directions = np.full(valid_table.num_rows, 'forward')
     aligner = mappy.Aligner(path_ref, preset=preset, best_n=1)
     alignments_dict = {
         'minimap2_q_st' : [],
@@ -103,7 +111,6 @@ def minimap2_table(table, path_ref, preset='splice', path_bed=None, skip_duplex_
         'minimap2_r_en' : [],
         'minimap2_mlen' : [],
         'minimap2_blen' : [],
-        'minimap2_mapq' : [],
         'minimap2_mapq' : [],
         'minimap2_cigar' : [],
         'minimap2_trans_strand' : []
@@ -176,23 +183,23 @@ def minimap2_table_from_file(file, path_ref, preset='splice', resume=False, over
     print("finished mapping ", file)
     return
 
-def minimap2(dataset_dir, path_ref, preset='splice', resume=False, overwrite=False, workers = 4, path_bed = None) :
+def minimap2(dataset_dir, path_ref, preset='splice', resume=False, overwrite=False, workers = 1, path_bed = None) :
     """
     Goes through the parquet dataset in dataset_dir and runs everything through minimap2 to assign sequencing reads to genes. Opens all files individually and runs minimap2_table_from_file(), which also saves the results to disk.
     
     Args :
-        dataset_dir (str) : the path to the folder containing the parquet files to be mapped. Should be path_out/pa_dataset/ where path_out is the same as what was used in build_parquet_dataset_from_sam.
-        path_ref (str) : path to the sequence reference to be used. Currently intended to work with a transcripomic reference, as count_mapped_reads will only work with that.
+        dataset_dir (str) : the path to the folder containing the parquet files to be mapped. Should be the same as what was used in build_parquet_dataset_from_sam and debarcode.
+        path_ref (str) : path to the sequence reference to be used. Can be either transcriptomic or genomic, with genomic being preferred. Genomic will be necessary if you want to do splicing analysis with this package.
         preset (str) : the preset to use for minimap2. Defaults to 'splice', which is designed to be splice-aware.
         resume (bool) : whether to resume mapping from a paused or broken run. This will only map files that don't already have minimap information in them, so it can't be used to continue a re-mapping session, as the files will all still have the original minimap data. Defaults to False.
         overwrite (bool) : whether to allow for overwriting mapped files. If True, it will remove any existing minimap data and continue with normal mapping. If False, it will skip over any files with minimap data.
-        workers (int) : number of parallel mapping processes to run. Note that minimap2 has high memory requirements, appearing to need about 8-12G per process to be stable. Using less will possisbly result in broken runs which are not currently set to re-run. Defaults to 4.
+        workers (int) : number of parallel mapping processes to run. Note that minimap2 has high memory requirements, appearing to need about 30-40G per process to be stable. Using less will possibly result in broken runs which are not currently set to re-run. Defaults to 1.
     """
-    files = [ x for x in Path(dataset_dir).iterdir() if x.is_file() ]
+    if type(dataset_dir) == str :
+        files = [ x for x in Path(dataset_dir).iterdir() if x.is_file() ]
     with concurrent.futures.ProcessPoolExecutor( max_workers=workers ) as executor :
         futures = [ executor.submit( minimap2_table_from_file, file, path_ref, preset=preset, resume=resume, overwrite=overwrite, path_bed=path_bed ) for file in files ]
         concurrent.futures.wait( futures )
-        print(futures)
     print("finished minimapping!")
     return
 
@@ -209,13 +216,12 @@ def strip_minimap_data(dataset_dir) :
     print('Done')
     return
 
-def count_mapped_reads(dataset_dir, path_out_csv, sample_dict, run_label = "None", max_match = 1) :
+def count_mapped_reads(dataset_dir, path_out_csv, sample_dict, run_label = "None", max_match = 1, remove_gene_prefix = False) :
     """
     Counts the mapped reads in the dataset_dir and tallies up gene counts, collapsing gene and transcript variants into one count per gene ID. Gene IDs are defined by the name in parentheses in the minimap reference file. Saves the resulting counts as csv.
     
     Args :
         dataset_dir (str) : the path to the folder containing the parquet files to be counted. Should be path_out/pa_dataset/ where path_out is the same as what was used in build_parquet_dataset_from_sam.
-        path_ref (str) : path to the sequence reference to be used. Currently intended to work with a transcripomic reference, essentially in the format of a fastq file where each row is a transcript with a contig ID, then sequence, then some tags. The critical information is the gene ID in parentheses, which must be the last parentheses in the first field of each row. ie XC001.4 Gene Name Etc. (version 1) (Gene ID), sequence, other information.
         path_out_csv (str) : the full path to where the results should be saved as csv. Will have a column per gene plus columns for barcode_ID, gene, and run_label. Each row denotes a different barcode/sample/run.
         sample_dict (dict) : a dictionary to define which barcodes belong to what sample names. Must be in the form of 'barcode ID' : 'sample name'.
         run_label (str) : a label that is assigned to all the reads in this dataset to potentially differentiate them from reads from other runs that might share the same barcode and sample names. Useful for combining reads from two runs with the same samples or if a run fails and is restarted.
@@ -239,7 +245,10 @@ def count_mapped_reads(dataset_dir, path_out_csv, sample_dict, run_label = "None
         gene_names = table_grouped.filter(pc.field('barcode_ID') == barcode).column('minimap2_gene_ID').to_pylist() + ['run_label', 'sample', 'barcode_ID']
         row_dict = {}
         for val, name in zip(row_values, gene_names) :
-            row_dict[name] = [val]
+            if remove_gene_prefix and name[:5] == 'gene-' :
+                row_dict[name[5:]] = [val]
+            else :
+                row_dict[name] = [val]
         tables_by_barcode.append(pa.table(row_dict))
     counts = pa.concat_tables(tables_by_barcode, promote_options='default')
     counts = utils.fill_table_nulls(counts, 0)
@@ -309,7 +318,7 @@ def count_mapped_reads(dataset_dir, path_out_csv, sample_dict, run_label = "None
 #     print('done!')
 #     return
 
-def combine_counts(path_csvs, path_out_csv) :
+def combine_counts(path_csvs, path_out_csv=None) :
     """
     Combine two counts csv files into a master table in a new location without modifying any counts. Intended to be the point where different runs are brought together for analysis. The resulting csv can be used in compare_counts().
     
@@ -320,12 +329,15 @@ def combine_counts(path_csvs, path_out_csv) :
     table_1 = csv.read_csv(path_csvs[0], read_options = csv.ReadOptions(block_size = 10000000))
     table_2 = csv.read_csv(path_csvs[1], read_options = csv.ReadOptions(block_size = 10000000))
     table_combined = pa.concat_tables([table_1, table_2], promote_options='default')
-    table_combined = pa.table([x.fill_null(0) for x in table_combined.itercolumns()], names=table_combined.column_names)
-    csv.write_csv(table_combined, path_out_csv)
+    table_combined = utils.fill_table_nulls(table_combined, 0)
     print("Done combining counts")
-    return
+    if path_out_csv != None :
+        csv.write_csv(table_combined, path_out_csv)
+        return
+    else :
+        return table_combined
 
-def add_counts(path_csvs, path_out_csv, new_run_label) :
+def add_counts(path_csvs, path_out_csv, new_run_label = None) :
     """
     Add together the counts within multiple counts csvs and generate a new csv table. This functions by grouping together values based on barcode and sample then adding them together per gene. Currently ignores any run_label tags and applies a new tag (new_run_label) to the new aggregated table. This is meant to combine counts from separate runs that are from the same samples ie restarting a broken sequencing run or generating additional data. 
     

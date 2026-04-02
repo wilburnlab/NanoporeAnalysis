@@ -341,7 +341,7 @@ def parse_polyA_UMI_SSP(seq, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 
     if len(possible_barcodes) == 0 :
         return {'barcode_ID': 'none matched', 'barcode_flag' : [0,0,0]}
     elif len(possible_barcodes) > 1 :
-        return {'barcode_ID':'multiple', 'barcode_flag' : [0,0,0]}
+        return {'barcode_ID': 'multiple', 'barcode_flag' : [0,0,0]}
     else :
         barcode_dict = possible_barcodes[0]
         left_barcode_indices = [ barcode_dict['barcode_UMI_start'] ]
@@ -391,6 +391,12 @@ def debarcode_table(table, UMIs, SSP, UMI_max_score, SSP_max_score, max_gap = 5,
         polyA_N (int) : number of characters to be considered a polyA sequence. Defaults to 4.
         polyA_tolerated_mismatches (int) : number of allowed gap characters between polyA alignments that will be grouped together into a larger polyA. Defaults to 1.
         polyA_min_len (int) : minimum length of the final polyX region(s) that will be considered a true polyA. Defaults to 10.
+        sample_dict (dict of (str):(str)) : dictionary mapping of barcode ID values (should be the same as the UMI names) to the sample ID that the barcode
+            corresponds to. Any barcodes that correspond to replicates of the same condition should have the same exact sample ID, without replicate labels.
+            For example, a dict for a control and a single condition could look like: {
+                'barcode_1' : 'control', 'barcode_2' : 'control', 'barcode_3' : 'control',
+                'barcode_3' : 'condition', 'barcode_4' : 'condition', 'barcode_5' : 'condition',
+            }
     
     Returns :
         table (pyarrow table) : the input table with the output from parse_polyA_UMI_SSP() added as new columns.
@@ -453,6 +459,12 @@ def debarcode_table_from_file(file, UMIs, SSP, UMI_max_score, SSP_max_score, max
         polyA_N (int) : number of characters to be considered a polyA sequence. Defaults to 4.
         polyA_tolerated_mismatches (int) : number of allowed gap characters between polyA alignments that will be grouped together into a larger polyA. Defaults to 1.
         polyA_min_len (int) : minimum length of the final polyX region(s) that will be considered a true polyA. Defaults to 10.
+        sample_dict (dict of (str):(str)) : dictionary mapping of barcode ID values (should be the same as the UMI names) to the sample ID that the barcode
+            corresponds to. Any barcodes that correspond to replicates of the same condition should have the same exact sample ID, without replicate labels.
+            For example, a dict for a control and a single condition could look like: {
+                'barcode_1' : 'control', 'barcode_2' : 'control', 'barcode_3' : 'control',
+                'barcode_3' : 'condition', 'barcode_4' : 'condition', 'barcode_5' : 'condition',
+            }
         resume (bool) : whether to resume debarcoding from a paused or broken run. This will only debarcode files that don't already have barcode information in them, so it can't be used to continue a re-debarcoding session, as the files will all still have the original barcode data. Defaults to False
         overwrite (bool) : whether to allow for overwriting debarcoded files. If True, it will remove any existing barode data and continue with normal debarcoding. If False, it will skip over any files with barcode data.
     """
@@ -477,7 +489,7 @@ def debarcode_table_from_file(file, UMIs, SSP, UMI_max_score, SSP_max_score, max
     del table
     return
 
-def debarcode(path_dataset, UMIs, SSP, UMI_max_score = 3, SSP_max_score = 5, max_gap = 5, UMI_min_len = 12, SSP_min_len = 15, polyA_N = 4, polyA_tolerated_mismatches = 1, polyA_min_len = 10, workers = 1, sample_dict = None, resume=False, overwrite=False) :
+def debarcode(path_dataset, UMIs, SSP, sample_dict = None, UMI_max_score = 3, SSP_max_score = 5, max_gap = 5, UMI_min_len = 12, SSP_min_len = 15, polyA_N = 4, polyA_tolerated_mismatches = 1, polyA_min_len = 10, workers = 1, resume=False, overwrite=False) :
     """
     Finds all parquet files within the given dataset directory under path_dataset, then pushes them through debarcode_table_from_file() to attempt to find barcodes.
     
@@ -486,6 +498,12 @@ def debarcode(path_dataset, UMIs, SSP, UMI_max_score = 3, SSP_max_score = 5, max
         UMIs (str) : list of [name, sequence] pairs for UMIs (unique molecular identifiers). These are the unique sequences of the barcodes. These should be given as the reverse complement of the actual sequence of the barcode primers,
             such that the full barcode would be (polyA sequence)-(UMI)-(SSP sequence). This is crucial for proper identification of barcodes.
         SSP (str) : sequence for the SSP (strand-switching primer), which should be the same sequence as the constant region on the barcodes.
+        sample_dict (dict of (str):(str)) : dictionary mapping of barcode ID values (should be the same as the UMI names) to the sample ID that the barcode
+            corresponds to. Any barcodes that correspond to replicates of the same condition should have the same exact sample ID, without replicate labels.
+            For example, a dict for a control and a single condition could look like: {
+                'barcode_1' : 'control', 'barcode_2' : 'control', 'barcode_3' : 'control',
+                'barcode_3' : 'condition', 'barcode_4' : 'condition', 'barcode_5' : 'condition',
+            }
         UMI_max_score (int) : maximum edit_distance for the UMI alignments. Any alignments with a higher edit_distance are discarded.
         SSP_max_score (int) : maximum edit_distance for the SSP alignments. Any alignments with a higher edit_distance are discarded.
         max_gap (int) : the maximum gap between the UMI and the polyA or SSP. Defaults to 5
