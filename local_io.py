@@ -124,6 +124,26 @@ def read_fastx(file_name, first_word = True, return_tags = False):
         raise FileContentsError(f'No sequences found in FAST{mode.upper()} file: {file_name}')
     return seq_dict
 
+def get_read_from_fastx(file, read_ID, first_word = True) :
+    """
+    Finds a specified read in a fasta or fastq file.
+
+    Args:
+        file (str or Path) : file path to fasta or fastq file.
+        read_ID (str) : the read ID to find.
+        first_word (bool) : whether to trim the fastx file read IDs to just the first 'word', ie trim everything past any space character.
+
+    Returns :
+        ctg_seq (str) : if found, the read sequence.
+    """
+    ctg_seq = None
+    with fastx_reader(file, first_word = True) as reader :
+        for contig in reader :
+            if contig[0] == read_ID :
+                ctg_seq = contig[1]
+                return ctg_seq
+    raise Exception("Error: matched contig not in reference file")
+
 def write_fastx(file_name: str | Path, 
                 seq_dict: dict,
                 chars_per_line: int = None,

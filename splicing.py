@@ -455,91 +455,6 @@ def table_to_pileup_by_gene(table, minimum_region_length = 5, max_match = 1, ign
                 print(i, len(genes))
     return pileup_dict
 
-def table_to_pileup_by_sample( table, minimum_region_length = 5, max_match = 1, ignore_ends = False, quiet = True, minimum_num_reads = 1, del_table = False, path_out = None ) :
-    table_clean = table.filter(~pc.field('barcode_sample_ID').isin(pa.array([None, 'None', 'none'], type=pa.string())))
-    sample_IDs = table_clean.column('barcode_sample_ID').unique().to_pylist()
-    sample_ID_list = []
-    barcode_ID_list = []
-    pileup_table = False
-    for sample_ID in sample_IDs :
-        table_filtered_sample = table_clean.filter( pc.field('barcode_sample_ID') == sample_ID ).filter(~pc.field('minimap2_gene_ID').isin(pa.array([None, 'None', 'none'], type=pa.string())))
-        sample_barcodes = table_filtered_sample.column('barcode_ID').unique().to_pylist()
-        for barcode in sample_barcodes :
-            sample_ID_list.append(sample_ID)
-            barcode_ID_list.append(barcode)
-            table_barcode_filtered = table_filtered_sample.filter(pc.field('barcode_ID') == barcode)
-            genes = table_barcode_filtered.column('minimap2_gene_ID').unique().to_pylist()
-            pileup_dict = table_to_pileup_by_gene( table_barcode_filtered,
-                           minimum_region_length = minimum_region_length, max_match = max_match,
-                           ignore_ends = ignore_ends, quiet = quiet, minimum_num_reads = minimum_num_reads )
-            if not pileup_table :
-                pileup_table = pa.table(copy.deepcopy(pileup_dict))
-                del pileup_dict
-            else :
-                pileup_table = pa.concat_tables([ pileup_table, pa.table(copy.deepcopy(pileup_dict)) ], promote_options="default")
-                del pileup_dict
-            del table_barcode_filtered
-        del table_filtered_sample
-    pileup_table = pileup_table.add_column(0, 'barcode_ID', [barcode_ID_list])
-    pileup_table = pileup_table.add_column(0, 'barcode_sample_ID', [sample_ID_list])
-    if del_table :
-        del table
-    pq.write_table(pileup_table, path_out)
-    del pileup_table
-    return
-
-def stream_dataset_to_pileup(path_dataset, path_out_pileup, workers = 1, minimum_region_length = 5, max_match = 1, ignore_ends = False, quiet = True, minimum_num_reads = 1 ) :
-    print("loading dataset")
-    if type(path_dataset) == list :
-        ds = dataset.dataset([ dataset.dataset(x) for x in path_dataset ])
-    else :
-        ds = dataset.dataset(path_dataset)
-    ds_batches = ds.to_batches( columns = [ 'barcode_ID', 'barcode_sample_ID', 'minimap2_ctg', 'minimap2_cigar','minimap2_r_st','minimap2_r_en', 'minimap2_gene_ID', 'minimap2_mlen' ], batch_size = 100000 )
-    j = 1
-    futures = []
-    with concurrent.futures.ProcessPoolExecutor( max_workers = workers ) as executor :
-        for batch in ds_batches :
-            futures.append(executor.submit( table_to_pileup_by_sample, batch, minimum_region_length = minimum_region_length, max_match = max_match, ignore_ends = ignore_ends, quiet = quiet, minimum_num_reads = minimum_num_reads, del_table = True ))
-            time.sleep(0.1)
-            while len([ 1 for x in futures if x.running() ]) >= workers :
-                time.sleep(1)
-            j += 1
-            if j % 100 == 0 :
-                print(j)
-    print("waiting")
-    concurrent.futures.wait(futures)
-    print("combining tables")
-    print(futures)
-    pileup_table = pa.concat_tables( [ future.result() for future in futures ], promote_options='default' )
-    print("done with pileups")
-    unique_barcodes = pileup_table.column('barcode_ID').unique().to_pylist()
-    unique_samples = pileup_table.column('barcode_sample_ID').unique().to_pylist()
-    pileup_dict = {
-        'barcode_sample_ID' : [],
-        'barcode_ID' : []
-    }
-    for sample in unique_samples :
-        print(sample)
-        for barcode in unique_barcodes :
-            barcode_filtered_table = pileup_table.filter( (pc.field('barcode_sample_ID') == sample) & (pc.field('barcode_ID') == barcode) )
-            for gene in barcode_filtered_table.column_names[2:] :
-                pileups = [ x for x in barcode_filtered_table.column(gene).to_pylist() if x != None ]
-                if len(pileups) > 0 :
-                    pileups = pad_compact_seqs(pileups, [0,0])
-                    aligned_pileups = align_compact_seqs(pileups, return_numpy = True)
-                    merged = np.concatenate([aligned_pileups[0,:,:1], np.sum(aligned_pileups[:,:,1:], axis=0)], axis=1).tolist()
-                else :
-                    merged = None
-                if gene not in pileup_dict :
-                    pileup_dict[gene] = [ None for x in range(len(pileup_dict['barcode_sample_ID']))]
-                pileup_dict[gene].append(merged)
-            pileup_dict['barcode_sample_ID'].append(sample)
-            pileup_dict['barcode_ID'].append(barcode)
-    pileup_table = pa.table(pileup_dict)
-    if path_out_pileup != None :
-        pq.write_table(pa.table(pileup_table), path_out_pileup)
-    return
-
 def create_pileups(path_dataset, path_out_pileup = None, minimum_region_length = 15, workers = 4, max_match = 1, ignore_ends = False, quiet = True, minimum_num_reads = 5) :
     """
     Creates sequence depth pileups against the genomic reference per gene for each barcode, creates a table with each gene as a column, and a row per barcode
@@ -1216,7 +1131,7 @@ def show_alignments_visual(table, target_indices = None, remove_outliers = False
         fig.savefig(save_fig)
     return
 
-def show_read_alignments(table, reference_seq = None, target_indices = None, ignore_I = False, minimum_region_length = 0, ignore_ends = False, max_match = 1, remove_outliers = False) :
+def show_read_alignments(table, reference_seq = None, target_indices = None, ignore_I = False, minimum_region_length = 0, ignore_ends = False, max_match = 1, remove_outliers = False, print_match_indicators = True, print_cigars = False) :
     """
     Prints the given reads aligned together, including an optional reference sequence.
     
@@ -1233,6 +1148,11 @@ def show_read_alignments(table, reference_seq = None, target_indices = None, ign
             are completely or nearly matched to the reference, which can be bad alignments or weird transcripts, if you're working with mRNA that is supposed
             to have introns. Set to 1 to not filter anything out.
         remove_outliers (bool) : whether or not to remove outlier alignments with remove_outlier_alignments().
+        print_match_indicators (bool) : whether or not to print the match indicators where (relative to the reference seq), '|' means a match, 'X' means a mismatch,
+            '^' means an insert, '-' means a deletion, and ' ' means a gap where the read has no data (for inserts from other reads or before/after the read).
+            Only prints if reference_seq is provided to compare against. Note that the 'M' in the cigar sequences can also indicate a small mismatch due to a
+            quirk with minimap2 alignment.
+        print_cigars (bool) : whether or not to print the cigar sequences.
         
     Returns :
         None
@@ -1287,16 +1207,34 @@ def show_read_alignments(table, reference_seq = None, target_indices = None, ign
             if index_statement_gap_len >= 5 :
                 index_statement_gap = index_statement_gap_len * ' '
                 print(left_index_statement + index_statement_gap + right_index_statement)
-            elif index_statement_gap_len > 0 :
+            elif index_statement_gap_len + len(right_index_statement) >= 0 :
                 index_statement_gap = (line_length - len(right_index_statement)) * ' '
                 print(index_statement_gap + right_index_statement)
             else :
                 index_statement_gap = (line_length - 1) * ' '
                 right_index_statement = 'V ' + str(target_indices[0] + i + line_length - num_inserts)
                 print(index_statement_gap + right_index_statement)
-            for cig, seq in zip(cigs_expanded, seqs_passed) :
-                print(cig[i:i+step_size])
-                print(seq[i:i+step_size])
+                
+            for j, cig, seq in zip(range(len(cigs_expanded)), cigs_expanded, seqs_passed) :
+                if reference_seq != None and j == 0 :
+                    ref_seq_selected = seq[i:i+step_size]
+                    print(ref_seq_selected)
+                else :
+                    seq_selected = seq[i:i+step_size]
+                    cig_selected = cig[i:i+step_size]
+                    if print_match_indicators and reference_seq :
+                        gaps = np.equal(list(cig_selected), ' ')
+                        matches = np.logical_and( np.equal(list(ref_seq_selected), list(seq_selected)), np.logical_not(gaps) )
+                        inserts = np.equal(list(cig_selected), 'I')
+                        dels = np.logical_or( np.equal(list(cig_selected), 'N'), np.equal(list(cig_selected), 'D') )
+                        indicators = np.where( matches, np.full(len(matches), '|'), np.full(len(matches), 'X') )
+                        indicators = np.where( gaps, np.full(len(matches), ' '), indicators )
+                        indicators = np.where( inserts, np.full(len(matches), '^'), indicators )
+                        indicators = np.where( dels, np.full(len(matches), '-'), indicators )
+                        print(''.join(indicators))
+                    if print_cigars :
+                        print(cig_selected)
+                    print(seq_selected)
             print()
     return
 
